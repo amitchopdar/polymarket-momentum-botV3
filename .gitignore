@@ -1,0 +1,35 @@
+# Python virtual environment
+venv/
+env/
+ENV/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Databases
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Environment & Sensitive Keys
+.env
+.env.local
+
+# Temporary logs & OS files
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Models & Artifacts
+models/*.pkl
+models/
+
+# Environment / Secret overrides
+.env
+.env.local
