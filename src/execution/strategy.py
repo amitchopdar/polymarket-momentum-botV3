@@ -731,6 +731,22 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 f"✅ [V3 MAKER FILL EXECUTED] Side={pos['Prediction_Side']} | Candle={candle_start} | "
                 f"Fill_Price=${fill_price:.4f} (0% Maker Fee) | TP=${take_profit_price:.4f} | SL=${stop_loss_price:.4f} | Status=OPEN"
             )
+
+            if hasattr(self, "notifier") and self.notifier:
+                try:
+                    self.notifier.notify_v2_trade_entry(
+                        candle_start=candle_start,
+                        side=pos['Prediction_Side'],
+                        fill_price=fill_price,
+                        buy_ceiling=limit_buy_price,
+                        tp_price=take_profit_price,
+                        sl_price=stop_loss_price,
+                        qty=target_qty,
+                        position_usd=round(fill_price * target_qty, 2)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to dispatch Telegram entry notification: {e}")
+
             return
 
         # 2. TIMEOUT CANCELLATION: 5 seconds elapsed without fill
