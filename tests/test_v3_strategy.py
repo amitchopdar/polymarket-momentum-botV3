@@ -51,7 +51,7 @@ def test_v3_successful_maker_fill(memory_db):
     assert strat.active_position is not None
     assert strat.active_position["Position_Status"] == "OPEN"
     assert strat.active_position["Average_Fill_Price"] == 0.68
-    assert strat.active_position["Take_Profit_Price"] == 0.73  # $0.68 + 0.05
+    assert strat.active_position["Take_Profit_Price"] == round(0.68 + getattr(config, "v2_take_profit_cents", 0.05), 4)
     assert strat.active_position["Stop_Loss_Price"] == 0.59    # HWM = $0.69 -> SL = $0.59 ($0.69 - 0.10)
 
 def test_v3_order_timeout_cancellation(memory_db):
