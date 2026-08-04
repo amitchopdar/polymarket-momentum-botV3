@@ -575,8 +575,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 self.notifier.notify_v2_trade_entry(
                     candle_start=candle_start,
                     side=side,
+                    signal_price=entry_odds,
                     fill_price=fill_price,
-                    buy_ceiling=limit_ceiling,
                     tp_price=take_profit_price,
                     sl_price=stop_loss_price,
                     qty=target_qty,
@@ -737,8 +737,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     self.notifier.notify_v2_trade_entry(
                         candle_start=candle_start,
                         side=pos['Prediction_Side'],
+                        signal_price=pos.get("Entry_Odds", fill_price),
                         fill_price=fill_price,
-                        buy_ceiling=limit_buy_price,
                         tp_price=take_profit_price,
                         sl_price=stop_loss_price,
                         qty=target_qty,

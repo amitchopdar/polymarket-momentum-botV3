@@ -185,15 +185,15 @@ class TelegramNotifier:
         )
         self.send_message(text)
 
-    def notify_v2_trade_entry(self, candle_start: str, side: str, fill_price: float, buy_ceiling: float, tp_price: float, sl_price: float, qty: float, position_usd: float) -> None:
+    def notify_v2_trade_entry(self, candle_start: str, side: str, signal_price: float, fill_price: float, tp_price: float, sl_price: float, qty: float, position_usd: float) -> None:
         ist_str = format_ist(candle_start)
         emoji = "🟢" if side == "UP" else "🔴"
         text = (
-            f"🚀 <b>V2 MOMENTUM TRADE ENTERED</b>\n"
+            f"🚀 <b>V3 MAKER TRADE ENTERED</b>\n"
             f"• <b>Candle:</b> <code>{ist_str}</code>\n"
             f"• <b>Prediction Side:</b> {emoji} <code>{side}</code>\n"
-            f"• <b>Fill Price:</b> <code>${fill_price:.3f}</code>\n"
-            f"• <b>Buy Ceiling Cap:</b> <code>${buy_ceiling:.3f}</code>\n"
+            f"• 📶 <b>Signal Price:</b> <code>${signal_price:.3f}</code>\n"
+            f"• 📥 <b>Entry Fill Price:</b> <code>${fill_price:.3f}</code> (0% Maker Fee)\n"
             f"• 🎯 <b>Take Profit:</b> <code>${tp_price:.4f}</code>\n"
             f"• 🛑 <b>Stop Loss:</b> <code>${sl_price:.4f}</code>\n"
             f"• 💰 <b>Position Size:</b> <code>${position_usd:.2f}</code> ({qty:.2f} shares)\n"
