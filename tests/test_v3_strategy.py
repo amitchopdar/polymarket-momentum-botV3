@@ -44,15 +44,15 @@ def test_v3_successful_maker_fill(memory_db):
     pos = strat.process_tick(candle_start, slug, "UP", token_id, 0.69, 0.70)
     assert pos["Position_Status"] == "PENDING_FILL"
 
-    # 2. Seller hits $0.68 bid within 2 seconds (bid = $0.68)
-    strat.process_tick(candle_start, slug, "UP", token_id, 0.68, 0.69)
+    # 2. Market price dips to touch $0.68 bid (bid = $0.68, ask = $0.68)
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.68, 0.68)
 
     # 3. Position fills at $0.68 and transitions to OPEN
     assert strat.active_position is not None
     assert strat.active_position["Position_Status"] == "OPEN"
     assert strat.active_position["Average_Fill_Price"] == 0.68
     assert strat.active_position["Take_Profit_Price"] == round(0.68 + getattr(config, "v2_take_profit_cents", 0.05), 4)
-    assert strat.active_position["Stop_Loss_Price"] == 0.59    # HWM = $0.69 -> SL = $0.59 ($0.69 - 0.10)
+    assert strat.active_position["Stop_Loss_Price"] == 0.58    # HWM = $0.68 -> SL = $0.58 ($0.68 - 0.10)
 
 def test_v3_order_timeout_cancellation(memory_db):
     strat = V2OddsMomentumStrategy(async_writer=None)

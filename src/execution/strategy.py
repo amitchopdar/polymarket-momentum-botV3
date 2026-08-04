@@ -693,8 +693,10 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         candle_start = pos["Candle_Start"]
         timeout_sec = getattr(config, "v3_maker_order_timeout_sec", 5.0)
 
-        # 1. FILL CONDITION: Seller hits our bid (current_bid >= limit_buy_price OR eff_price <= limit_buy_price)
-        if current_bid is not None and current_bid >= limit_buy_price:
+        # 1. REALISTIC MAKER FILL CONDITION: Market price dips down to touch or cross our limit bid (eff_price <= limit_buy_price)
+        eff_price = current_bid if (current_bid is not None and current_bid > 0) else current_ask
+
+        if eff_price is not None and eff_price <= limit_buy_price:
             fill_price = limit_buy_price
             high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
             high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.995)
