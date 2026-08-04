@@ -1,12 +1,11 @@
 version: '3.8'
 
 services:
-  polymarket-v2:
-    container_name: polymarket-bot-v2
+  polymarket-v3:
     build: .
+    container_name: polymarket-bot-v3
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      # Persist SQLite database file outside container
-      - ./PolyDB_V2.sqlite:/app/PolyDB_V2.sqlite
+      - ./PolyDB_V3.sqlite:/app/PolyDB_V3.sqlite
