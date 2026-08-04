@@ -61,10 +61,11 @@ class PolymarketBot:
         Starts database writer, Telegram services, and initial Polymarket WebSocket subscription.
         """
         logger.info("==================================================================")
-        logger.info("🚀 STARTING POLYMARKET BOT V2 (Standalone Odds Momentum Engine)")
+        logger.info("🚀 STARTING POLYMARKET BOT V3 (0% Fee Maker & 5s Order Timeout Engine)")
         logger.info(f"   Execution Mode : {config.execution_mode}")
         logger.info(f"   Database Path  : {self.db_path}")
         logger.info(f"   Strategy       : +{config.v2_momentum_threshold_cents} Cent Shift in {config.v2_momentum_window_sec}s | Min Odds Floor=${config.v2_min_entry_odds_floor:.2f}")
+        logger.info(f"   Maker Entry    : Limit Buy at Ask - ${config.v3_maker_offset_cents:.2f} (0% Fee) | Timeout={config.v3_maker_order_timeout_sec:.1f}s")
         logger.info(f"   Risk Exits     : TP=+${config.v2_take_profit_cents:.2f} (+{config.v2_take_profit_cents*100:.0f}¢) | Trailing SL=-${config.v2_trailing_sl_distance_cents:.2f} (-{config.v2_trailing_sl_distance_cents*100:.0f}¢)")
         logger.info("==================================================================")
 
