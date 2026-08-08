@@ -5,6 +5,7 @@ persistent $0.40 buy order tracking, automated $0.20 stop-loss limit sell order)
 and LiveExecutionStrategy (Polymarket CLOB REST API & EIP-712 signer wrapper).
 """
 
+import os
 import time
 import logging
 from abc import ABC, abstractmethod
@@ -610,38 +611,35 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
 
         target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+        buy_order_id = f"V3_MAKER_{int(now_ts*1000)}"
 
         pos = {
             "Candle_Start": candle_start,
-            "Prob_Cal": 0.50,
-            "Prob_Uncal": 0.50,
             "Slug": slug,
             "Token_Id": token_id,
-            "Prediction_Side": side,
-            "Actual_Outcome": None,
+            "Position_Side": side,
             "Entry_Timestamp": now_dt,
             "Order_Timestamp_Sec": now_ts,
             "Trigger_Odds_10s_Ago": trigger_odds_10s_ago,
             "Entry_Odds": entry_odds,
-            "Limit_Ceiling": limit_buy_price,
+            "Target_Buy_Price": limit_buy_price,
             "Target_Price": limit_buy_price,
             "Target_Quantity": target_qty,
             "Filled_Quantity": 0.0,
+            "Sell_Quantity": 0.0,
             "Average_Fill_Price": None,
             "Take_Profit_Price": None,
             "Stop_Loss_Price": None,
+            "High_Water_Mark": limit_buy_price,
+            "Buy_Order_Id": buy_order_id,
+            "Sell_Order_Id": None,
             "Exit_Timestamp": None,
             "Exit_Price": None,
             "Exit_Reason": None,
             "Trade_Outcome": None,
-            "Order_Id": f"V3_MAKER_{int(now_ts*1000)}",
             "Position_Status": "PENDING_FILL",
             "Cancel_Reason": None,
-            "Transaction_Price": 0.0,
             "Pnl": 0.0,
-            "Min_Price_Observed": limit_buy_price,
-            "Max_Price_Observed": limit_buy_price,
-            "High_Water_Mark": limit_buy_price,
             "Updated_At": now_dt
         }
 
@@ -651,19 +649,17 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if self.async_writer:
             sql = """
                 INSERT INTO Positions (
-                    Candle_Start, Prob_Cal, Prob_Uncal, Slug, Token_Id, Prediction_Side, Actual_Outcome,
-                    Entry_Timestamp, Trigger_Odds_10s_Ago, Entry_Odds, Target_Price, Target_Quantity,
-                    Filled_Quantity, Average_Fill_Price, Take_Profit_Price, Stop_Loss_Price, Order_Id,
-                    Position_Status, Cancel_Reason, Transaction_Price, Pnl, Updated_At
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    Candle_Start, Slug, Token_Id, Position_Side, Entry_Timestamp,
+                    Trigger_Odds_10s_Ago, Entry_Odds, Target_Buy_Price, Target_Quantity,
+                    Filled_Quantity, Sell_Quantity, Buy_Order_Id, Position_Status, Pnl, Updated_At
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             self.async_writer.enqueue_write(
                 sql,
                 (
-                    candle_start, 0.50, 0.50, slug, token_id, side, None,
-                    now_dt, trigger_odds_10s_ago, entry_odds, limit_buy_price, target_qty,
-                    0.0, None, None, None, pos["Order_Id"],
-                    "PENDING_FILL", None, 0.0, 0.0, now_dt
+                    candle_start, slug, token_id, side, now_dt,
+                    trigger_odds_10s_ago, entry_odds, limit_buy_price, target_qty,
+                    0.0, 0.0, buy_order_id, "PENDING_FILL", 0.0, now_dt
                 )
             )
 
@@ -677,8 +673,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
     def _evaluate_pending_fill(self, current_bid: Optional[float], current_ask: Optional[float]) -> None:
         """
         Evaluates active PENDING_FILL order on every tick for:
-        1. Fill Condition: If current_bid >= Limit_Buy_Price (a seller hits our bid) -> Fills & transitions to OPEN.
-        2. Timeout Cancellation: If 5.0 seconds elapsed without fill -> Auto-cancels order (CANCELLED_TIMEOUT) & unlocks guard.
+        1. Fill Condition: If market price dips <= Target_Buy_Price (a seller hits our bid) -> Fills & transitions to OPEN.
+        2. Timeout Cancellation: If 5.0 seconds elapsed without full fill -> Cancels remaining unfilled size.
+           If 0 shares filled -> CANCELLED_TIMEOUT. If partially filled -> Transitions to OPEN for filled shares.
         """
         pos = self.active_position
         if not pos or pos.get("Position_Status") != "PENDING_FILL":
@@ -688,7 +685,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         placed_sec = pos.get("Order_Timestamp_Sec", now_sec)
         elapsed_sec = now_sec - placed_sec
-        limit_buy_price = pos["Target_Price"]
+        limit_buy_price = pos["Target_Buy_Price"]
         target_qty = pos["Target_Quantity"]
         candle_start = pos["Candle_Start"]
         timeout_sec = getattr(config, "v3_maker_order_timeout_sec", 5.0)
@@ -710,8 +707,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             pos["Filled_Quantity"] = target_qty
             pos["Take_Profit_Price"] = take_profit_price
             pos["Stop_Loss_Price"] = stop_loss_price
-            pos["Min_Price_Observed"] = fill_price
-            pos["Max_Price_Observed"] = fill_price
             pos["High_Water_Mark"] = fill_price
             pos["Position_Status"] = "OPEN"
             pos["Updated_At"] = now_dt
@@ -725,12 +720,12 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                         Stop_Loss_Price = ?,
                         Position_Status = 'OPEN',
                         Updated_At = ?
-                    WHERE Order_Id = ?;
+                    WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'PENDING_FILL');
                 """
-                self.async_writer.enqueue_write(sql, (fill_price, target_qty, take_profit_price, stop_loss_price, now_dt, pos["Order_Id"]))
+                self.async_writer.enqueue_write(sql, (fill_price, target_qty, take_profit_price, stop_loss_price, now_dt, pos.get("Buy_Order_Id"), candle_start))
 
             logger.info(
-                f"✅ [V3 MAKER FILL EXECUTED] Side={pos['Prediction_Side']} | Candle={candle_start} | "
+                f"✅ [V3 MAKER FILL EXECUTED] Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | Candle={candle_start} | "
                 f"Fill_Price=${fill_price:.4f} (0% Maker Fee) | TP=${take_profit_price:.4f} | SL=${stop_loss_price:.4f} | Status=OPEN"
             )
 
@@ -738,7 +733,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 try:
                     self.notifier.notify_v2_trade_entry(
                         candle_start=candle_start,
-                        side=pos['Prediction_Side'],
+                        side=pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'),
                         signal_price=pos.get("Entry_Odds", fill_price),
                         fill_price=fill_price,
                         tp_price=take_profit_price,
@@ -751,59 +746,94 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
             return
 
-        # 2. TIMEOUT CANCELLATION: 5 seconds elapsed without fill
+        # 2. TIMEOUT CANCELLATION & PARTIAL ENTRY FILL HANDLING: 5 seconds elapsed
         if elapsed_sec >= timeout_sec:
-            pos["Position_Status"] = "CANCELLED"
-            pos["Exit_Reason"] = "CANCELLED_TIMEOUT"
-            pos["Cancel_Reason"] = f"Unfilled after {elapsed_sec:.1f}s (>{timeout_sec:.1f}s Limit)"
-            pos["Updated_At"] = now_dt
+            filled_qty = pos.get("Filled_Quantity", 0.0)
 
-            if self.async_writer:
-                sql = """
-                    UPDATE Positions SET
-                        Position_Status = 'CANCELLED',
-                        Exit_Reason = 'CANCELLED_TIMEOUT',
-                        Cancel_Reason = ?,
-                        Updated_At = ?
-                    WHERE Order_Id = ?;
-                """
-                self.async_writer.enqueue_write(sql, (pos["Cancel_Reason"], now_dt, pos["Order_Id"]))
+            if filled_qty <= 0.0:
+                pos["Position_Status"] = "CANCELLED"
+                pos["Exit_Reason"] = "CANCELLED_TIMEOUT"
+                pos["Cancel_Reason"] = f"Unfilled after {elapsed_sec:.1f}s (>{timeout_sec:.1f}s Limit)"
+                pos["Updated_At"] = now_dt
 
-            logger.warning(
-                f"⏰ [V3 MAKER ORDER TIMEOUT] Cancelled! Side={pos['Prediction_Side']} | Candle={candle_start} | "
-                f"Limit_Price=${limit_buy_price:.4f} unfilled after {elapsed_sec:.1f}s. Unlocking position guard."
-            )
+                if self.async_writer:
+                    sql = """
+                        UPDATE Positions SET
+                            Position_Status = 'CANCELLED',
+                            Exit_Reason = 'CANCELLED_TIMEOUT',
+                            Cancel_Reason = ?,
+                            Updated_At = ?
+                        WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'PENDING_FILL');
+                    """
+                    self.async_writer.enqueue_write(sql, (pos["Cancel_Reason"], now_dt, pos.get("Buy_Order_Id"), candle_start))
 
-            if pos.get("Token_Id") in self.tick_buffers:
-                self.tick_buffers[pos["Token_Id"]].clear()
-            self.active_position = None
+                logger.warning(
+                    f"⏰ [V3 MAKER ORDER TIMEOUT] Cancelled! Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | Candle={candle_start} | "
+                    f"Limit_Price=${limit_buy_price:.4f} unfilled after {elapsed_sec:.1f}s. Unlocking position guard."
+                )
+
+                if pos.get("Token_Id") in self.tick_buffers:
+                    self.tick_buffers[pos["Token_Id"]].clear()
+                self.active_position = None
+            else:
+                # Partially filled at 5.0s timeout -> Activate OPEN status for filled_qty shares
+                fill_price = limit_buy_price
+                high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
+                high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.995)
+                tp_cents = getattr(config, "v2_take_profit_cents", 0.05)
+                trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
+
+                stop_loss_price = round(max(0.01, fill_price - trailing_dist), 4)
+                take_profit_price = high_odds_tp if fill_price >= high_odds_cutoff else round(min(high_odds_tp, fill_price + tp_cents), 4)
+
+                pos["Average_Fill_Price"] = fill_price
+                pos["Take_Profit_Price"] = take_profit_price
+                pos["Stop_Loss_Price"] = stop_loss_price
+                pos["High_Water_Mark"] = fill_price
+                pos["Position_Status"] = "OPEN"
+                pos["Updated_At"] = now_dt
+
+                if self.async_writer:
+                    sql = """
+                        UPDATE Positions SET
+                            Average_Fill_Price = ?,
+                            Filled_Quantity = ?,
+                            Take_Profit_Price = ?,
+                            Stop_Loss_Price = ?,
+                            Position_Status = 'OPEN',
+                            Updated_At = ?
+                        WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'PENDING_FILL');
+                    """
+                    self.async_writer.enqueue_write(sql, (fill_price, filled_qty, take_profit_price, stop_loss_price, now_dt, pos.get("Buy_Order_Id"), candle_start))
+
+                logger.info(
+                    f"✅ [V3 PARTIAL MAKER FILL AT TIMEOUT] Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | Candle={candle_start} | "
+                    f"Filled_Qty={filled_qty:.2f}/{target_qty:.2f} @ ${fill_price:.4f} | TP=${take_profit_price:.4f} | SL=${stop_loss_price:.4f} | Status=OPEN"
+                )
 
     def _evaluate_tp_sl_exit(self, current_bid: Optional[float], current_ask: Optional[float]) -> Optional[Dict[str, Any]]:
         """
         Evaluates active open position against Take Profit and Stop Loss thresholds on every live tick.
-        Tracks running price extremes (min/max) to guarantee mid-candle SL/TP detection even during fast price spikes.
+        Tracks dynamic High Water Mark (HWM) and Trailing Stop Loss in memory, writing exact HWM & SL to disk on trade closure/partial exit.
         """
         pos = self.active_position
-        if not pos or pos.get("Position_Status") != "OPEN":
+        if not pos or pos.get("Position_Status") not in ("OPEN", "PARTIALLY_CLOSED"):
             return None
 
         tp_price = pos["Take_Profit_Price"]
         sl_price = pos["Stop_Loss_Price"]
         entry_price = pos["Average_Fill_Price"]
-        qty = pos["Filled_Quantity"]
+        filled_qty = pos["Filled_Quantity"]
         candle_start = pos["Candle_Start"]
-        now_dt = datetime.fromtimestamp(time.time(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_ts = time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         # Determine effective live price for exit evaluation (prefer bid, fallback to ask)
         eff_price = current_bid if (current_bid is not None and current_bid > 0) else current_ask
         peak_price = max(current_bid or 0.0, current_ask or 0.0)
 
-        # Update running candle extremes and High Water Mark (HWM)
+        # Update in-memory High Water Mark (HWM) and Trailing Stop Loss
         if eff_price is not None and eff_price > 0:
-            pos["Min_Price_Observed"] = min(pos.get("Min_Price_Observed", eff_price), eff_price)
-            pos["Max_Price_Observed"] = max(pos.get("Max_Price_Observed", peak_price), peak_price)
-
-            # High Water Mark Trailing Stop Loss Logic (Option A)
             hwm = max(pos.get("High_Water_Mark", entry_price), peak_price)
             pos["High_Water_Mark"] = hwm
 
@@ -814,93 +844,98 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 # Trailing SL can ONLY move UP, never down
                 if candidate_sl > pos["Stop_Loss_Price"]:
                     pos["Stop_Loss_Price"] = candidate_sl
-                    # Reset minimum price tracking from the new peak
-                    pos["Min_Price_Observed"] = eff_price
 
         sl_price = pos["Stop_Loss_Price"]
-        min_obs = pos.get("Min_Price_Observed", eff_price or 1.0)
-        max_obs = pos.get("Max_Price_Observed", eff_price or 0.0)
 
-        # 1. STOP LOSS TRIGGER (Check if current price OR running minimum price during candle breached SL target)
-        if (eff_price is not None and eff_price <= sl_price) or min_obs <= sl_price:
-            exit_price = sl_price
-            pnl = round((exit_price - entry_price) * qty, 4)
+        # 1. STOP LOSS OR TAKE PROFIT TRIGGER
+        is_sl_trigger = (eff_price is not None and eff_price <= sl_price)
+        is_tp_trigger = (eff_price is not None and eff_price >= tp_price)
+
+        if is_sl_trigger or is_tp_trigger:
+            exit_reason = "STOP_LOSS" if is_sl_trigger else "TAKE_PROFIT"
+            trade_outcome = "STOP_LOSS_HIT" if is_sl_trigger else "TAKE_PROFIT_ACHIEVED"
+            exit_price = sl_price if is_sl_trigger else tp_price
+            sell_order_id = f"V3_SELL_{int(now_ts*1000)}"
+
+            prev_sell_qty = pos.get("Sell_Quantity", 0.0)
+            exit_qty = filled_qty - prev_sell_qty
+            if exit_qty <= 0:
+                exit_qty = filled_qty
+
+            new_sell_qty = round(prev_sell_qty + exit_qty, 4)
+            pos["Sell_Quantity"] = new_sell_qty
+            pos["Sell_Order_Id"] = sell_order_id
             pos["Exit_Timestamp"] = now_dt
             pos["Exit_Price"] = exit_price
-            pos["Exit_Reason"] = "STOP_LOSS"
-            pos["Trade_Outcome"] = "STOP_LOSS_HIT"
-            pos["Position_Status"] = "CLOSED"
-            pos["Pnl"] = pnl
+            pos["Exit_Reason"] = exit_reason
+            pos["Trade_Outcome"] = trade_outcome
             pos["Updated_At"] = now_dt
 
-            if self.async_writer:
-                sql = """
-                    UPDATE Positions SET
-                        Exit_Timestamp = ?,
-                        Exit_Price = ?,
-                        Exit_Reason = 'STOP_LOSS',
-                        Trade_Outcome = 'STOP_LOSS_HIT',
-                        Position_Status = 'CLOSED',
-                        Pnl = ?,
-                        Updated_At = ?
-                    WHERE Candle_Start = ? AND Position_Status = 'OPEN';
-                """
-                self.async_writer.enqueue_write(sql, (now_dt, exit_price, pnl, now_dt, candle_start))
-
-            logger.warning(
-                f"🛑 [V2 STOP LOSS HIT] Exit Executed! Side={pos['Prediction_Side']} | Candle={candle_start} | "
-                f"Exit_Price=${exit_price:.4f} (SL Target=${sl_price:.4f}) | PnL=${pnl:+.4f}"
-            )
-            if hasattr(self, "notifier") and self.notifier:
-                try:
-                    self.notifier.notify_v2_trade_exit(candle_start, pos['Prediction_Side'], exit_price, "STOP_LOSS_HIT", pnl)
-                except Exception as e:
-                    logger.warning(f"Failed to dispatch Telegram SL exit notification: {e}")
-
-            if pos.get("Token_Id") in self.tick_buffers:
-                self.tick_buffers[pos["Token_Id"]].clear()
-            self.active_position = None
-            return pos
-
-        # 2. TAKE PROFIT TRIGGER (Check if current price OR running maximum price during candle breached TP target)
-        if (eff_price is not None and eff_price >= tp_price) or max_obs >= tp_price:
-            exit_price = tp_price
-            pnl = round((exit_price - entry_price) * qty, 4)
-            pos["Exit_Timestamp"] = now_dt
-            pos["Exit_Price"] = exit_price
-            pos["Exit_Reason"] = "TAKE_PROFIT"
-            pos["Trade_Outcome"] = "TAKE_PROFIT_ACHIEVED"
-            pos["Position_Status"] = "CLOSED"
+            taker_fee_pct = getattr(config, "v2_taker_fee_pct", 0.02)
+            taker_fee_cost = round(exit_price * taker_fee_pct * exit_qty, 4)
+            pnl = round((exit_price - entry_price) * exit_qty - taker_fee_cost, 4)
             pos["Pnl"] = pnl
-            pos["Updated_At"] = now_dt
 
-            if self.async_writer:
-                sql = """
-                    UPDATE Positions SET
-                        Exit_Timestamp = ?,
-                        Exit_Price = ?,
-                        Exit_Reason = 'TAKE_PROFIT',
-                        Trade_Outcome = 'TAKE_PROFIT_ACHIEVED',
-                        Position_Status = 'CLOSED',
-                        Pnl = ?,
-                        Updated_At = ?
-                    WHERE Candle_Start = ? AND Position_Status = 'OPEN';
-                """
-                self.async_writer.enqueue_write(sql, (now_dt, exit_price, pnl, now_dt, candle_start))
+            if new_sell_qty < filled_qty:
+                pos["Position_Status"] = "PARTIALLY_CLOSED"
+                if self.async_writer:
+                    sql = """
+                        UPDATE Positions SET
+                            Sell_Quantity = ?,
+                            High_Water_Mark = ?,
+                            Stop_Loss_Price = ?,
+                            Position_Status = 'PARTIALLY_CLOSED',
+                            Updated_At = ?
+                        WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'PARTIALLY_CLOSED'));
+                    """
+                    self.async_writer.enqueue_write(sql, (new_sell_qty, pos["High_Water_Mark"], pos["Stop_Loss_Price"], now_dt, pos.get("Buy_Order_Id"), candle_start))
 
-            logger.info(
-                f"🎯 [V2 TAKE PROFIT HIT] Target Achieved! Side={pos['Prediction_Side']} | Candle={candle_start} | "
-                f"Exit_Price=${exit_price:.4f} (TP Target=${tp_price:.4f}) | PnL=${pnl:+.4f}"
-            )
-            if hasattr(self, "notifier") and self.notifier:
-                try:
-                    self.notifier.notify_v2_trade_exit(candle_start, pos['Prediction_Side'], exit_price, "TAKE_PROFIT_ACHIEVED", pnl)
-                except Exception as e:
-                    logger.warning(f"Failed to dispatch Telegram TP exit notification: {e}")
+                logger.info(
+                    f"🌗 [V3 PARTIAL EXIT] Reason={exit_reason} | Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | Candle={candle_start} | "
+                    f"Sold_Qty={new_sell_qty:.2f}/{filled_qty:.2f} @ ${exit_price:.4f} | HWM=${pos['High_Water_Mark']:.4f} | SL=${pos['Stop_Loss_Price']:.4f}"
+                )
+            else:
+                pos["Position_Status"] = "CLOSED"
+                if self.async_writer:
+                    sql = """
+                        UPDATE Positions SET
+                            Exit_Timestamp = ?,
+                            Exit_Price = ?,
+                            Exit_Reason = ?,
+                            Trade_Outcome = ?,
+                            Sell_Order_Id = ?,
+                            Sell_Quantity = ?,
+                            High_Water_Mark = ?,
+                            Stop_Loss_Price = ?,
+                            Position_Status = 'CLOSED',
+                            Pnl = ?,
+                            Updated_At = ?
+                        WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'PARTIALLY_CLOSED'));
+                    """
+                    self.async_writer.enqueue_write(
+                        sql,
+                        (
+                            now_dt, exit_price, exit_reason, trade_outcome,
+                            sell_order_id, new_sell_qty, pos["High_Water_Mark"],
+                            pos["Stop_Loss_Price"], pnl, now_dt, pos.get("Buy_Order_Id"), candle_start
+                        )
+                    )
 
-            if pos.get("Token_Id") in self.tick_buffers:
-                self.tick_buffers[pos["Token_Id"]].clear()
-            self.active_position = None
+                logger.info(
+                    f"🏁 [V3 TRADE CLOSED] Reason={exit_reason} | Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | Candle={candle_start} | "
+                    f"Exit_Price=${exit_price:.4f} | HWM=${pos['High_Water_Mark']:.4f} | SL=${pos['Stop_Loss_Price']:.4f} | PnL=${pnl:+.4f}"
+                )
+
+                if hasattr(self, "notifier") and self.notifier:
+                    try:
+                        self.notifier.notify_v2_trade_exit(candle_start, pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'), exit_price, trade_outcome, pnl)
+                    except Exception as e:
+                        logger.warning(f"Failed to dispatch Telegram exit notification: {e}")
+
+                if pos.get("Token_Id") in self.tick_buffers:
+                    self.tick_buffers[pos["Token_Id"]].clear()
+                self.active_position = None
+
             return pos
 
         return None
@@ -914,24 +949,30 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if not pos:
             return None
 
-        now_dt = datetime.fromtimestamp(time.time(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now_ts = time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         entry_price = pos["Average_Fill_Price"]
-        qty = pos["Filled_Quantity"]
+        filled_qty = pos["Filled_Quantity"]
+        prev_sell_qty = pos.get("Sell_Quantity", 0.0)
+        exit_qty = filled_qty - prev_sell_qty
+        if exit_qty <= 0:
+            exit_qty = filled_qty
+
+        new_sell_qty = round(prev_sell_qty + exit_qty, 4)
         raw_exit = current_price or entry_price
         candle_start = pos["Candle_Start"]
+        sell_order_id = f"V3_SELL_{int(now_ts*1000)}"
 
         sl_price = pos["Stop_Loss_Price"]
         tp_price = pos["Take_Profit_Price"]
-        min_obs = pos.get("Min_Price_Observed", raw_exit)
-        max_obs = pos.get("Max_Price_Observed", raw_exit)
 
-        # Priority 1: Check if Stop Loss was breached at any point during candle
-        if min_obs <= sl_price or raw_exit <= sl_price:
+        # Priority 1: Check if Stop Loss was breached
+        if raw_exit <= sl_price:
             exit_price = sl_price
             reason = "STOP_LOSS"
             outcome = "STOP_LOSS_HIT"
-        # Priority 2: Check if Take Profit was breached at any point during candle
-        elif max_obs >= tp_price or raw_exit >= tp_price:
+        # Priority 2: Check if Take Profit was breached
+        elif raw_exit >= tp_price:
             exit_price = tp_price
             reason = "TAKE_PROFIT"
             outcome = "TAKE_PROFIT_ACHIEVED"
@@ -940,8 +981,12 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             reason = "CANDLE_EXPIRED"
             outcome = "EXPIRED"
 
-        pnl = round((exit_price - entry_price) * qty, 4)
+        taker_fee_pct = getattr(config, "v2_taker_fee_pct", 0.02)
+        taker_fee_cost = round(exit_price * taker_fee_pct * new_sell_qty, 4)
+        pnl = round((exit_price - entry_price) * new_sell_qty - taker_fee_cost, 4)
 
+        pos["Sell_Quantity"] = new_sell_qty
+        pos["Sell_Order_Id"] = sell_order_id
         pos["Exit_Timestamp"] = now_dt
         pos["Exit_Price"] = exit_price
         pos["Exit_Reason"] = reason
@@ -957,28 +1002,38 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     Exit_Price = ?,
                     Exit_Reason = ?,
                     Trade_Outcome = ?,
+                    Sell_Order_Id = ?,
+                    Sell_Quantity = ?,
+                    High_Water_Mark = ?,
+                    Stop_Loss_Price = ?,
                     Position_Status = 'CLOSED',
                     Pnl = ?,
                     Updated_At = ?
-                WHERE Candle_Start = ? AND Position_Status = 'OPEN';
+                WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'PARTIALLY_CLOSED'));
             """
-            self.async_writer.enqueue_write(sql, (now_dt, exit_price, reason, outcome, pnl, now_dt, candle_start))
+            self.async_writer.enqueue_write(
+                sql,
+                (
+                    now_dt, exit_price, reason, outcome, sell_order_id,
+                    new_sell_qty, pos["High_Water_Mark"], pos["Stop_Loss_Price"],
+                    pnl, now_dt, pos.get("Buy_Order_Id"), candle_start
+                )
+            )
 
         logger.info(
-            f"⌛ [V2 CANDLE CLOSED] Position Closed on 5m Boundary! Reason={reason} | Side={pos['Prediction_Side']} | "
-            f"Candle={candle_start} | Exit_Price=${exit_price:.4f} | PnL=${pnl:+.4f}"
+            f"⌛ [V3 CANDLE CLOSED] Position Closed on 5m Boundary! Reason={reason} | Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | "
+            f"Candle={candle_start} | Exit_Price=${exit_price:.4f} | HWM=${pos['High_Water_Mark']:.4f} | SL=${pos['Stop_Loss_Price']:.4f} | PnL=${pnl:+.4f}"
         )
         if hasattr(self, "notifier") and self.notifier:
             try:
-                self.notifier.notify_v2_trade_exit(candle_start, pos['Prediction_Side'], exit_price, reason, pnl)
+                self.notifier.notify_v2_trade_exit(candle_start, pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'), exit_price, outcome, pnl)
             except Exception as e:
-                logger.warning(f"Failed to dispatch Telegram boundary exit notification: {e}")
+                logger.warning(f"Failed to dispatch Telegram exit notification: {e}")
 
         if pos.get("Token_Id") in self.tick_buffers:
             self.tick_buffers[pos["Token_Id"]].clear()
-
-        # Unlock active position for new 5m candle
         self.active_position = None
+
         return pos
 
     def execute_entry(self, *args, **kwargs) -> Optional[Dict[str, Any]]:
@@ -994,14 +1049,36 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 class LiveExecutionStrategy(IExecutionStrategy):
     """
     Live Execution Strategy Wrapper.
-    Integrates Polymarket CLOB REST API client and EIP-712 cryptographic signature handling.
+    Integrates Polymarket CLOB REST API client (py-clob-client) and EIP-712 cryptographic signature handling.
     In simulation/dry-run fallback, delegates safely to DryExecutionStrategy.
     """
 
     def __init__(self, async_writer: Optional[AsyncDBWriter] = None):
         self.dry_strategy = DryExecutionStrategy(async_writer)
-        self.api_key = config.polymarket_api_key
-        self.private_key = config.polymarket_private_key
+        self.clob_client = None
+        self._init_clob_client()
+
+    def _init_clob_client(self) -> None:
+        api_key = getattr(config, "polymarket_api_key", None) or os.getenv("POLYMARKET_API_KEY")
+        private_key = getattr(config, "polymarket_private_key", None) or os.getenv("POLYMARKET_PRIVATE_KEY")
+        secret = os.getenv("POLYMARKET_SECRET", "")
+        passphrase = os.getenv("POLYMARKET_PASSPHRASE", "")
+
+        if api_key and private_key:
+            try:
+                from py_clob_client.client import ClobClient
+                from py_clob_client.clob_types import ApiCreds
+
+                creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if secret else None
+                self.clob_client = ClobClient(
+                    host=getattr(config, "polymarket_clob_url", "https://clob.polymarket.com"),
+                    key=private_key,
+                    chain_id=137,
+                    creds=creds
+                )
+                logger.info("⚡ [LIVE CLOB CLIENT] Successfully initialized authenticated Polymarket CLOB client.")
+            except Exception as e:
+                logger.warning(f"Failed to initialize py-clob-client SDK: {e}. Live fallback to DryExecutionStrategy.")
 
     def execute_entry(
         self,
@@ -1016,19 +1093,44 @@ class LiveExecutionStrategy(IExecutionStrategy):
         current_bid: Optional[float] = None,
         current_ask: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
-        if config.is_dry_run() or not self.api_key or not self.private_key:
+        if config.is_dry_run() or not self.clob_client:
             logger.info("Live execution fallback: Delegating to DryExecutionStrategy (Simulation Mode active).")
             return self.dry_strategy.execute_entry(
                 candle_start, slug, side, prob_cal, prob_uncal, target_price,
                 position_usd, token_id, current_bid, current_ask
             )
 
-        # Real Polymarket CLOB REST API Order Dispatch Stub
-        logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Signed Buy Limit Order for token {token_id[:8]}... at ${target_price:.2f}")
-        return self.dry_strategy.execute_entry(
-            candle_start, slug, side, prob_cal, prob_uncal, target_price,
-            position_usd, token_id, current_bid, current_ask
-        )
+        # Real Polymarket CLOB REST API Order Dispatch via py-clob-client
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
+            entry_odds = current_ask or target_price
+            limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
+            target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+
+            logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Post-Only Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} Qty={target_qty}")
+            order_args = OrderArgs(
+                price=limit_buy_price,
+                size=target_qty,
+                side="BUY",
+                token_id=token_id
+            )
+            signed_order = self.clob_client.create_order(order_args)
+            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+
+            pos = self.dry_strategy.execute_entry(
+                candle_start, slug, side, prob_cal, prob_uncal, limit_buy_price,
+                position_usd, token_id, current_bid, current_ask
+            )
+            if pos and isinstance(resp, dict) and "orderID" in resp:
+                pos["Buy_Order_Id"] = resp["orderID"]
+            return pos
+        except Exception as e:
+            logger.error(f"Failed to post Live CLOB Order: {e}. Fallback to DryExecutionStrategy.")
+            return self.dry_strategy.execute_entry(
+                candle_start, slug, side, prob_cal, prob_uncal, target_price,
+                position_usd, token_id, current_bid, current_ask
+            )
 
     def execute_exit(
         self,
@@ -1038,6 +1140,16 @@ class LiveExecutionStrategy(IExecutionStrategy):
         reason: str
     ) -> Optional[Dict[str, Any]]:
         return self.dry_strategy.execute_exit(candle_start, token_id, exit_price, reason)
+
+    def cancel_order_on_exchange(self, buy_order_id: str) -> bool:
+        if self.clob_client and buy_order_id:
+            try:
+                resp = self.clob_client.cancel(buy_order_id)
+                logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] BuyOrderID={buy_order_id} | Response={resp}")
+                return True
+            except Exception as e:
+                logger.error(f"⚠ Failed physical CLOB order cancellation for {buy_order_id}: {e}")
+        return False
 
     def check_and_update_positions(
         self,

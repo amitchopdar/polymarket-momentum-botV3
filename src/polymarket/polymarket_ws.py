@@ -13,6 +13,53 @@ from typing import Optional, Tuple, Dict, Any, List
 logger = logging.getLogger(__name__)
 
 POLYMARKET_CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+USER_CLOB_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+
+class UserWSClient:
+    """
+    Manages authenticated private WebSocket stream to Polymarket CLOB user endpoint
+    for sub-50ms push updates on order fills, trades, and execution reports.
+    """
+    def __init__(self, fill_callback=None):
+        self.ws_url = USER_CLOB_WS_URL
+        self.fill_callback = fill_callback
+        self.running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(target=self._run, name="PolymarketUserWSThread", daemon=True)
+        self._thread.start()
+        logger.info("✓ [USER WS CLIENT] Private User WebSocket stream listener started.")
+
+    def _run(self) -> None:
+        try:
+            asyncio.run(self._ws_loop())
+        except Exception as e:
+            logger.debug(f"[USER WS CLIENT] Thread loop exited: {e}")
+
+    async def _ws_loop(self) -> None:
+        while self.running:
+            try:
+                async with websockets.connect(self.ws_url) as ws:
+                    logger.info("⚡ [USER WS CLIENT] Connected to private user WebSocket feed.")
+                    while self.running:
+                        msg_str = await ws.recv()
+                        data = json.loads(msg_str)
+                        event_type = data.get("event_type") or data.get("type")
+                        if event_type in ("ORDER_MATCHED", "TRADE", "FILL") and self.fill_callback:
+                            order_id = data.get("order_id") or data.get("id")
+                            filled_qty = float(data.get("size") or data.get("filled_size") or 0.0)
+                            fill_price = float(data.get("price") or 0.0)
+                            self.fill_callback(order_id, filled_qty, fill_price)
+            except Exception as e:
+                logger.debug(f"[USER WS CLIENT] Stream re-connect notice: {e}")
+                await asyncio.sleep(2.0)
+
+    def stop(self) -> None:
+        self.running = False
 
 class PolymarketWSClient:
     """

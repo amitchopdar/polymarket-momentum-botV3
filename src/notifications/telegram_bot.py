@@ -265,7 +265,10 @@ class TelegramCommandRouter:
             cursor.execute("SELECT Position_Status, COUNT(*) FROM Positions GROUP BY Position_Status;")
             rows = dict(cursor.fetchall())
             conn.close()
-            return rows.get("PENDING", 0), rows.get("OPEN", 0), rows.get("CLOSED", 0)
+            pending = rows.get("PENDING_FILL", 0) + rows.get("PENDING", 0)
+            open_pos = rows.get("OPEN", 0) + rows.get("PARTIALLY_CLOSED", 0)
+            closed = rows.get("CLOSED", 0)
+            return pending, open_pos, closed
         except Exception:
             return 0, 0, 0
 

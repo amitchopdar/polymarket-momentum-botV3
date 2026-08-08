@@ -48,7 +48,7 @@ USER_V2_HIGH_ODDS_TP_TARGET = 0.995        # Fixed TP target price for Tier 2 ($
 USER_V2_TRAILING_SL_ENABLED = True         # Enable Trailing Stop Loss based on High Water Mark
 USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.10  # Trailing SL distance from HWM (10 cents)
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.65       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
-USER_V2_MAX_POSITION_SIZE_USD = 2.0        # Max position size per trade ($2.00)
+USER_V2_MAX_POSITION_SIZE_USD = 5.0        # Max position size per trade ($2.00)
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
@@ -87,6 +87,8 @@ class AppConfig:
     v2_min_entry_odds_floor: float = field(default_factory=lambda: float(os.getenv("V2_MIN_ENTRY_ODDS_FLOOR", str(USER_V2_MIN_ENTRY_ODDS_FLOOR))))
     max_position_size_usd: float = field(default_factory=lambda: float(os.getenv("MAX_POSITION_SIZE_USD", str(USER_V2_MAX_POSITION_SIZE_USD))))
     v2_max_active_positions: int = field(default_factory=lambda: int(os.getenv("V2_MAX_ACTIVE_POSITIONS", str(USER_V2_MAX_ACTIVE_POSITIONS))))
+
+    v2_taker_fee_pct: float = field(default_factory=lambda: float(os.getenv("V2_TAKER_FEE_PCT", "0.02")))
 
     # V3 Maker Strategy Specific Fields
     v3_maker_offset_cents: float = field(default_factory=lambda: float(os.getenv("V3_MAKER_OFFSET_CENTS", str(USER_V3_MAKER_OFFSET_CENTS))))

@@ -27,7 +27,8 @@ def test_v3_maker_offset_placement(memory_db):
     assert pos is not None
     assert pos["Position_Status"] == "PENDING_FILL"
     assert pos["Entry_Odds"] == 0.70
-    assert pos["Target_Price"] == round(0.70 - 0.02, 4)  # $0.68 Limit Buy ($0.70 Ask - $0.02 Offset)
+    assert pos["Position_Side"] == "UP"
+    assert pos["Target_Buy_Price"] == round(0.70 - 0.02, 4)  # $0.68 Limit Buy ($0.70 Ask - $0.02 Offset)
     assert pos["Filled_Quantity"] == 0.0
     assert strat.active_position is not None
 

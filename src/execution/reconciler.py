@@ -46,7 +46,7 @@ class StateReconciler:
 
             cursor.execute("""
                 SELECT * FROM Positions 
-                WHERE Position_Status IN ('PENDING', 'OPEN')
+                WHERE Position_Status IN ('PENDING_FILL', 'OPEN', 'PARTIALLY_CLOSED')
             """)
             rows = cursor.fetchall()
 
@@ -54,6 +54,7 @@ class StateReconciler:
                 row_dict = dict(row)
                 candle_start = row_dict["Candle_Start"]
                 status = row_dict["Position_Status"]
+                pos_side = row_dict.get("Position_Side") or row_dict.get("Prediction_Side") or "UP"
 
                 # Only restore if position belongs to the CURRENT ACTIVE candle (or recent window)
                 if candle_start == curr_active_candle or abs((datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()) - curr_candle_sec) < 300:
@@ -62,7 +63,7 @@ class StateReconciler:
                     reconciled_count += 1
                     logger.info(
                         f"✓ [STATE RECONCILER] Restored active trade on boot: Candle={candle_start} | "
-                        f"Side={row_dict.get('Prediction_Side')} | Status={status}"
+                        f"Side={pos_side} | Status={status}"
                     )
                 else:
                     # Auto-close stale past candle position in SQLite
@@ -73,7 +74,7 @@ class StateReconciler:
                     conn.commit()
                     logger.info(
                         f"✓ [STATE RECONCILER] Auto-closed stale past trade on boot: Candle={candle_start} | "
-                        f"Side={row_dict.get('Prediction_Side')} | Status=CLOSED (EXPIRED_BOOT)"
+                        f"Side={pos_side} | Status=CLOSED (EXPIRED_BOOT)"
                     )
 
             conn.close()
