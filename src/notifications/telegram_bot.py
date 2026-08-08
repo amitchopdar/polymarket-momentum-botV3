@@ -30,7 +30,8 @@ class TelegramCommandRouter:
     def __init__(self, notifier: TelegramNotifier, db_path: str = "PolyDB.sqlite"):
         self.notifier = notifier
         self.db_path = db_path
-        self.bot_token = config.telegram_bot_token
+        raw_token = getattr(config, "telegram_bot_token", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.bot_token = str(raw_token).strip("\"' ") if raw_token else ""
         self.running = False
         self.last_update_id = 0
         self.poll_thread: Optional[threading.Thread] = None
