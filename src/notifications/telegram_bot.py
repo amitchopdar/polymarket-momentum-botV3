@@ -44,15 +44,6 @@ class TelegramCommandRouter:
             return
 
         self.running = True
-        # Flush old historical updates on boot to sync immediately with live commands
-        try:
-            init_updates = self._get_updates()
-            if init_updates:
-                self.last_update_id = max(u.get("update_id", 0) for u in init_updates)
-                logger.info(f"✓ [TELEGRAM COMMAND ROUTER] Synced update queue (latest update_id={self.last_update_id}).")
-        except Exception as e:
-            logger.warning(f"Notice syncing initial Telegram update queue: {e}")
-
         self.poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name="TelegramCommandRouterPoll")
         self.poll_thread.start()
         logger.info("✓ [TELEGRAM COMMAND ROUTER] Long-polling worker started successfully.")
@@ -83,8 +74,8 @@ class TelegramCommandRouter:
                     data = json.loads(resp.read().decode("utf-8"))
                     if data.get("ok"):
                         return data.get("result", [])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[TELEGRAM POLL] Notice fetching updates: {e}")
         return []
 
     def _is_authorized(self, user_id: int) -> bool:
@@ -108,6 +99,8 @@ class TelegramCommandRouter:
 
         if not text.startswith("/"):
             return
+
+        logger.info(f"📱 Telegram Command Received: Text='{text}' From User={user_id}")
 
         # Check authorization middleware
         if not self._is_authorized(user_id):
