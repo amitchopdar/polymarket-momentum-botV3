@@ -1054,7 +1054,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
     """
 
     def __init__(self, async_writer: Optional[AsyncDBWriter] = None):
-        self.dry_strategy = DryExecutionStrategy(async_writer)
+        self.dry_strategy = V2OddsMomentumStrategy(async_writer)
         self.clob_client = None
         self._init_clob_client()
 
