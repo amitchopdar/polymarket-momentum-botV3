@@ -117,6 +117,7 @@ class AppConfig:
     polymarket_secret: str = field(default_factory=lambda: os.getenv("POLYMARKET_SECRET", ""))
     polymarket_passphrase: str = field(default_factory=lambda: os.getenv("POLYMARKET_PASSPHRASE", ""))
     polymarket_private_key: str = field(default_factory=lambda: os.getenv("POLYMARKET_PRIVATE_KEY", ""))
+    polymarket_funder: str = field(default_factory=lambda: os.getenv("POLYMARKET_FUNDER", ""))
 
     def is_dry_run(self) -> bool:
         return self.execution_mode == "DRY_RUN" or self.dry_run

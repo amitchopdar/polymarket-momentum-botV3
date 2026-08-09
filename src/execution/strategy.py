@@ -1083,6 +1083,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
         private_key = str(raw_private_key).strip("\"' ")
         secret = str(raw_secret).strip("\"' ")
         passphrase = str(raw_passphrase).strip("\"' ")
+        raw_funder = getattr(config, "polymarket_funder", None) or os.getenv("POLYMARKET_FUNDER", "")
+        funder = str(raw_funder).strip("\"' ") or None
 
         if private_key:
             try:
@@ -1100,7 +1102,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
                     key=private_key,
                     chain_id=137,
                     creds=creds,
-                    signature_type=sig_type
+                    signature_type=sig_type,
+                    funder=funder
                 )
                 if not creds or not creds.api_secret:
                     logger.info("🔑 Auto-deriving CLOB API Credentials from Polymarket server...")
