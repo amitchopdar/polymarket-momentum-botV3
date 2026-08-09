@@ -1059,10 +1059,15 @@ class LiveExecutionStrategy(IExecutionStrategy):
         self._init_clob_client()
 
     def _init_clob_client(self) -> None:
-        api_key = getattr(config, "polymarket_api_key", None) or os.getenv("POLYMARKET_API_KEY")
-        private_key = getattr(config, "polymarket_private_key", None) or os.getenv("POLYMARKET_PRIVATE_KEY")
-        secret = os.getenv("POLYMARKET_SECRET", "")
-        passphrase = os.getenv("POLYMARKET_PASSPHRASE", "")
+        raw_api_key = getattr(config, "polymarket_api_key", None) or os.getenv("POLYMARKET_API_KEY", "")
+        raw_private_key = getattr(config, "polymarket_private_key", None) or os.getenv("POLYMARKET_PRIVATE_KEY", "")
+        raw_secret = os.getenv("POLYMARKET_SECRET", "")
+        raw_passphrase = os.getenv("POLYMARKET_PASSPHRASE", "")
+
+        api_key = str(raw_api_key).strip("\"' ")
+        private_key = str(raw_private_key).strip("\"' ")
+        secret = str(raw_secret).strip("\"' ")
+        passphrase = str(raw_passphrase).strip("\"' ")
 
         if api_key and private_key:
             try:
