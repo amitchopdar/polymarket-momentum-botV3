@@ -15,7 +15,7 @@ from src.config import config
 from src.database.connection import PolyDBManager, AsyncDBWriter
 from src.polymarket.token_resolver import PolymarketTokenResolver, MinuteOddsTracker
 from src.polymarket.polymarket_ws import PolymarketWSClient
-from src.execution.strategy import V2OddsMomentumStrategy
+from src.execution.strategy import V2OddsMomentumStrategy, LiveExecutionStrategy
 from src.notifications.notifier import TelegramNotifier
 from src.notifications.telegram_bot import TelegramCommandRouter
 
