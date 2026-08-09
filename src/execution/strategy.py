@@ -1093,7 +1093,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
                     from py_clob_client.client import ClobClient
                     from py_clob_client.clob_types import ApiCreds
 
-                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1").strip("\"' "))
+                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "2").strip("\"' "))
                 creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if (api_key and secret and passphrase) else None
                 self.clob_client = ClobClient(
                     host=getattr(config, "polymarket_clob_url", "https://clob.polymarket.com"),
@@ -1153,8 +1153,16 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 side="BUY",
                 token_id=token_id
             )
-            signed_order = self.clob_client.create_order(order_args)
-            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+            try:
+                signed_order = self.clob_client.create_order(order_args)
+                resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+            except Exception as first_err:
+                logger.warning(f"⚠ Initial order post failed ({first_err}). Retrying with Deposit Wallet Flow (signature_type=2)...")
+                if hasattr(self.clob_client, "builder"):
+                    setattr(self.clob_client.builder, "signature_type", 2)
+                    setattr(self.clob_client.builder, "sig_type", 2)
+                signed_order = self.clob_client.create_order(order_args)
+                resp = self.clob_client.post_order(signed_order, OrderType.GTC)
 
             pos = self.dry_strategy.execute_entry(
                 candle_start, slug, side, prob_cal, prob_uncal, limit_buy_price,
