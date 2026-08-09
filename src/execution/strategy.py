@@ -1084,13 +1084,13 @@ class LiveExecutionStrategy(IExecutionStrategy):
         secret = str(raw_secret).strip("\"' ")
         passphrase = str(raw_passphrase).strip("\"' ")
 
-        if api_key and private_key:
+        if private_key:
             try:
                 from py_clob_client.client import ClobClient
                 from py_clob_client.clob_types import ApiCreds
 
                 sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1").strip("\"' "))
-                creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if secret else None
+                creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if (api_key and secret and passphrase) else None
                 self.clob_client = ClobClient(
                     host=getattr(config, "polymarket_clob_url", "https://clob.polymarket.com"),
                     key=private_key,
@@ -1098,7 +1098,13 @@ class LiveExecutionStrategy(IExecutionStrategy):
                     creds=creds,
                     signature_type=sig_type
                 )
-                logger.info("⚡ [LIVE CLOB CLIENT] Successfully initialized authenticated Polymarket CLOB client.")
+                if not creds or not creds.api_secret:
+                    logger.info("🔑 Auto-deriving CLOB API Credentials from Polymarket server...")
+                    derived_creds = self.clob_client.create_or_derive_api_creds()
+                    if derived_creds:
+                        self.clob_client.creds = derived_creds
+                        logger.info(f"🔑 [LIVE CLOB CLIENT] Derived valid API Key: {derived_creds.api_key[:8]}...")
+                logger.info(f"⚡ [LIVE CLOB CLIENT] Successfully initialized authenticated Polymarket CLOB client (signature_type={sig_type}).")
             except Exception as e:
                 logger.warning(f"Failed to initialize py-clob-client SDK: {e}. Live fallback to DryExecutionStrategy.")
 
