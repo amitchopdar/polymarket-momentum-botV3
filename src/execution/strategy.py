@@ -1067,8 +1067,9 @@ class LiveExecutionStrategy(IExecutionStrategy):
     In simulation/dry-run fallback, delegates safely to DryExecutionStrategy.
     """
 
-    def __init__(self, async_writer: Optional[AsyncDBWriter] = None):
-        self.dry_strategy = V2OddsMomentumStrategy(async_writer, live_strategy=self)
+    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None):
+        self.notifier = notifier
+        self.dry_strategy = V2OddsMomentumStrategy(async_writer, notifier=notifier, live_strategy=self)
         self.clob_client = None
         self._init_clob_client()
 
