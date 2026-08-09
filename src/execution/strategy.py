@@ -1165,3 +1165,15 @@ class LiveExecutionStrategy(IExecutionStrategy):
     ) -> Optional[Dict[str, Any]]:
         return self.dry_strategy.check_and_update_positions(candle_start, token_id, current_bid, current_ask)
 
+    def process_tick(
+        self,
+        candle_start: str,
+        slug: str,
+        side: str,
+        token_id: str,
+        current_bid: Optional[float],
+        current_ask: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        return self.dry_strategy.process_tick(candle_start, slug, side, token_id, current_bid, current_ask)
+
+

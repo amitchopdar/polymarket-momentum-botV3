@@ -49,8 +49,13 @@ class PolymarketBot:
         self.notifier = TelegramNotifier()
         self.telegram_bot = TelegramCommandRouter(self.notifier, db_path=self.db_path)
 
-        # V2 Odds Momentum Strategy Engine
-        self.v2_strategy = V2OddsMomentumStrategy(self.async_writer, notifier=self.notifier)
+        # V2 / V3 Odds Momentum Strategy Engine (Select Live vs Dry Run based on config)
+        if not config.is_dry_run():
+            logger.info("⚡ [LIVE STRATEGY ENGINE] Instantiating LiveExecutionStrategy with authenticated Polymarket CLOB client...")
+            self.v2_strategy = LiveExecutionStrategy(self.async_writer)
+        else:
+            logger.info("📄 [DRY RUN STRATEGY ENGINE] Instantiating DryExecutionStrategy (Paper Simulation)...")
+            self.v2_strategy = V2OddsMomentumStrategy(self.async_writer, notifier=self.notifier)
 
         self.running = False
         self._last_preflight_sec = -1
