@@ -1086,8 +1086,12 @@ class LiveExecutionStrategy(IExecutionStrategy):
 
         if private_key:
             try:
-                from py_clob_client.client import ClobClient
-                from py_clob_client.clob_types import ApiCreds
+                try:
+                    from py_clob_client_v2 import ClobClient
+                    from py_clob_client_v2.clob_types import ApiCreds
+                except ImportError:
+                    from py_clob_client.client import ClobClient
+                    from py_clob_client.clob_types import ApiCreds
 
                 sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1").strip("\"' "))
                 creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if (api_key and secret and passphrase) else None
@@ -1100,10 +1104,12 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 )
                 if not creds or not creds.api_secret:
                     logger.info("🔑 Auto-deriving CLOB API Credentials from Polymarket server...")
-                    derived_creds = self.clob_client.create_or_derive_api_creds()
-                    if derived_creds:
-                        self.clob_client.creds = derived_creds
-                        logger.info(f"🔑 [LIVE CLOB CLIENT] Derived valid API Key: {derived_creds.api_key[:8]}...")
+                    derive_fn = getattr(self.clob_client, "create_or_derive_api_key", getattr(self.clob_client, "create_or_derive_api_creds", None))
+                    if derive_fn:
+                        derived_creds = derive_fn()
+                        if derived_creds:
+                            self.clob_client.creds = derived_creds
+                            logger.info(f"🔑 [LIVE CLOB CLIENT] Derived valid API Key: {derived_creds.api_key[:8]}...")
                 logger.info(f"⚡ [LIVE CLOB CLIENT] Successfully initialized authenticated Polymarket CLOB client (signature_type={sig_type}).")
             except Exception as e:
                 logger.warning(f"Failed to initialize py-clob-client SDK: {e}. Live fallback to DryExecutionStrategy.")
@@ -1128,9 +1134,13 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 position_usd, token_id, current_bid, current_ask
             )
 
-        # Real Polymarket CLOB REST API Order Dispatch via py-clob-client
+        # Real Polymarket CLOB REST API Order Dispatch via py-clob-client V2
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            try:
+                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
+            except ImportError:
+                from py_clob_client.clob_types import OrderArgs, OrderType
+
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
             entry_odds = current_ask or target_price
             limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
@@ -1172,9 +1182,11 @@ class LiveExecutionStrategy(IExecutionStrategy):
     def cancel_order_on_exchange(self, buy_order_id: str) -> bool:
         if self.clob_client and buy_order_id:
             try:
-                resp = self.clob_client.cancel(buy_order_id)
-                logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] BuyOrderID={buy_order_id} | Response={resp}")
-                return True
+                cancel_fn = getattr(self.clob_client, "cancel_order", getattr(self.clob_client, "cancel", None))
+                if cancel_fn:
+                    resp = cancel_fn(buy_order_id)
+                    logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] BuyOrderID={buy_order_id} | Response={resp}")
+                    return True
             except Exception as e:
                 logger.error(f"⚠ Failed physical CLOB order cancellation for {buy_order_id}: {e}")
         return False
