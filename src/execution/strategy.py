@@ -1089,12 +1089,14 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 from py_clob_client.client import ClobClient
                 from py_clob_client.clob_types import ApiCreds
 
+                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0").strip("\"' "))
                 creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if secret else None
                 self.clob_client = ClobClient(
                     host=getattr(config, "polymarket_clob_url", "https://clob.polymarket.com"),
                     key=private_key,
                     chain_id=137,
-                    creds=creds
+                    creds=creds,
+                    signature_type=sig_type
                 )
                 logger.info("⚡ [LIVE CLOB CLIENT] Successfully initialized authenticated Polymarket CLOB client.")
             except Exception as e:
