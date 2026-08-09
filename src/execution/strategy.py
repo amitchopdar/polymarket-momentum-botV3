@@ -389,9 +389,10 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
     Enforces a strict SINGLE POSITION lock across the entire bot.
     """
 
-    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None):
+    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None, live_strategy: Optional[Any] = None):
         self.async_writer = async_writer
         self.notifier = notifier
+        self.live_strategy = live_strategy
         # Token tick buffers: token_id -> list of (timestamp_sec, bid, ask)
         self.tick_buffers: Dict[str, List[Tuple[float, float, float]]] = {}
         # Single Active Position Guard across the bot
@@ -456,6 +457,19 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         min_odds_floor = getattr(config, "v2_min_entry_odds_floor", 0.65)
 
         if delta_odds >= momentum_thresh and current_ask >= min_odds_floor:
+            if self.live_strategy and self.live_strategy.clob_client:
+                return self.live_strategy.execute_entry(
+                    candle_start=candle_start,
+                    slug=slug,
+                    side=side,
+                    prob_cal=0.50,
+                    prob_uncal=0.50,
+                    target_price=current_ask,
+                    position_usd=getattr(config, "max_position_size_usd", 2.0),
+                    token_id=token_id,
+                    current_bid=current_bid,
+                    current_ask=current_ask
+                )
             return self.execute_entry_v3(
                 candle_start=candle_start,
                 slug=slug,
@@ -1054,7 +1068,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
     """
 
     def __init__(self, async_writer: Optional[AsyncDBWriter] = None):
-        self.dry_strategy = V2OddsMomentumStrategy(async_writer)
+        self.dry_strategy = V2OddsMomentumStrategy(async_writer, live_strategy=self)
         self.clob_client = None
         self._init_clob_client()
 
