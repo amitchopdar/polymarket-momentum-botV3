@@ -1106,8 +1106,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
                     from py_clob_client.client import ClobClient
                     from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
-                # Standard Metamask Deposit Wallet flow requires signature_type=3 (POLY_1271)
-                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3" if funder else "0").strip("\"' "))
+                # Polymarket Deposit Wallet smart contract flow requires signature_type=2 (POLY_GNOSIS_SAFE)
+                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "2" if funder else "0").strip("\"' "))
                 host = getattr(config, "polymarket_clob_url", "https://clob.polymarket.com")
                 creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if (api_key and secret and passphrase) else None
 
@@ -1196,10 +1196,10 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 signed_order = self.clob_client.create_order(order_args)
                 resp = self.clob_client.post_order(signed_order, OrderType.GTC)
             except Exception as first_err:
-                logger.warning(f"⚠ Initial order post failed ({first_err}). Retrying with Deposit Wallet Flow (signature_type=3 POLY_1271)...")
+                logger.warning(f"⚠ Initial order post failed ({first_err}). Retrying with Deposit Wallet Flow (signature_type=2 POLY_GNOSIS_SAFE)...")
                 if hasattr(self.clob_client, "builder"):
-                    setattr(self.clob_client.builder, "signature_type", 3)
-                    setattr(self.clob_client.builder, "sig_type", 3)
+                    setattr(self.clob_client.builder, "signature_type", 2)
+                    setattr(self.clob_client.builder, "sig_type", 2)
                 signed_order = self.clob_client.create_order(order_args)
                 resp = self.clob_client.post_order(signed_order, OrderType.GTC)
 
