@@ -1109,28 +1109,26 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 # Polymarket ERC-1271 Deposit Wallet smart contract flow requires signature_type=3 (POLY_1271)
                 sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3" if funder else "0").strip("\"' "))
                 host = getattr(config, "polymarket_clob_url", "https://clob.polymarket.com")
-                creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if (api_key and secret and passphrase) else None
-
-                if not creds or not creds.api_secret:
-                    logger.info(f"🔑 [L1 AUTH] Initializing EIP-712 L1 Auth Client (signature_type={sig_type}, funder={funder[:10] if funder else 'None'})...")
-                    temp_client = ClobClient(
-                        host=host,
-                        key=private_key,
-                        chain_id=137,
-                        signature_type=sig_type,
-                        funder=funder
-                    )
-                    logger.info("🔑 [L2 CREDS] Auto-deriving CLOB HMAC API Credentials from Polymarket server...")
-                    derive_fn = getattr(temp_client, "create_or_derive_api_key", getattr(temp_client, "create_or_derive_api_creds", None))
-                    if derive_fn:
-                        derived_creds = derive_fn()
-                        if derived_creds:
-                            creds = ApiCreds(
-                                api_key=derived_creds.api_key,
-                                api_secret=derived_creds.api_secret,
-                                api_passphrase=derived_creds.api_passphrase
-                            )
-                            logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
+                # Always force fresh L2 API key derivation for signature_type=3 + funder (Deposit Wallet)
+                logger.info(f"🔑 [L1 AUTH] Initializing EIP-712 L1 Auth Client (signature_type={sig_type}, funder={funder[:10] if funder else 'None'})...")
+                temp_client = ClobClient(
+                    host=host,
+                    key=private_key,
+                    chain_id=137,
+                    signature_type=sig_type,
+                    funder=funder
+                )
+                logger.info("🔑 [L2 CREDS] Auto-deriving CLOB HMAC API Credentials for Deposit Wallet...")
+                derive_fn = getattr(temp_client, "create_or_derive_api_key", getattr(temp_client, "create_or_derive_api_creds", None))
+                if derive_fn:
+                    derived_creds = derive_fn()
+                    if derived_creds:
+                        creds = ApiCreds(
+                            api_key=derived_creds.api_key,
+                            api_secret=derived_creds.api_secret,
+                            api_passphrase=derived_creds.api_passphrase
+                        )
+                        logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key bound to Deposit Wallet: {creds.api_key[:8]}...")
 
                 self.clob_client = ClobClient(
                     host=host,
