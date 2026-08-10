@@ -29,11 +29,22 @@ def test_v2_minimum_odds_floor_filter(memory_db):
     pos_low = strat.process_tick(candle_start, slug, "UP", "TOK_LOW", 0.54, 0.55)
     assert pos_low is None
 
-    # 2. Signal at $0.70 (Surge +0.16 >= 0.15 AND Ask $0.70 >= $0.65 floor) -> ENTER TRADE
+    # 2. Signal at $0.70 (Surge +0.16 >= 0.15 AND Ask $0.70 >= $0.65 floor AND Ask $0.70 <= $0.92 ceiling) -> ENTER TRADE
     strat.tick_buffers["TOK_HIGH"] = [(now_sec - 10.0, 0.53, 0.54)]
     pos_high = strat.process_tick(candle_start, slug, "UP", "TOK_HIGH", 0.69, 0.70)
     assert pos_high is not None
     assert pos_high["Entry_Odds"] == 0.70
+
+def test_v2_max_entry_odds_ceiling_filter(memory_db):
+    strat = V2OddsMomentumStrategy(async_writer=None)
+    candle_start = "2026-07-31 17:00:00"
+    slug = "btc-updown-5m-1785517200"
+    now_sec = time.time()
+
+    # Signal at $0.94 (Surge +0.16 >= 0.15, but Ask $0.94 > $0.92 ceiling) -> NO TRADE
+    strat.tick_buffers["TOK_CEILING"] = [(now_sec - 10.0, 0.77, 0.78)]
+    pos_ceiling = strat.process_tick(candle_start, slug, "UP", "TOK_CEILING", 0.93, 0.94)
+    assert pos_ceiling is None
 
 def test_v2_momentum_trigger_and_tp_sl_calculation(memory_db):
     strat = V2OddsMomentumStrategy(async_writer=None)
