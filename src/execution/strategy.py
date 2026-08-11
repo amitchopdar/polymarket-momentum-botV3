@@ -885,6 +885,22 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             if order_info and isinstance(order_info, dict):
                 size_matched = round(float(order_info.get("size_matched") or order_info.get("sizeMatched") or 0.0), 4)
                 status = str(order_info.get("status", "")).upper()
+
+                # Extract exact real fill price from Polymarket CLOB exchange response
+                real_price = float(order_info.get("price") or 0.0)
+                making = float(order_info.get("makingAmount") or order_info.get("making_amount") or 0.0)
+                taking = float(order_info.get("takingAmount") or order_info.get("taking_amount") or 0.0)
+                if real_price <= 0 and making > 0 and taking > 0:
+                    real_price = round(taking / making, 4)
+
+                if real_price > 0:
+                    pos["Exit_Price"] = real_price
+                    entry_p = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price", 0.0)
+                    calc_qty = size_matched if size_matched > 0 else exit_qty
+                    calc_pnl = round((real_price - entry_p) * calc_qty, 4)
+                    pos["Pnl"] = calc_pnl
+                    pos["Trade_Outcome"] = "WIN" if real_price >= entry_p else "LOSS"
+
                 if status in ("MATCHED", "FILLED") or size_matched >= (exit_qty - 0.01):
                     is_filled = True
         else:
