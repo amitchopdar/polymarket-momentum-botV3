@@ -796,8 +796,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
                 sell_order_id = f"V3_SL_{int(now_sec*1000)}"
                 if self.live_strategy and self.live_strategy.clob_client and token_id:
-                    aggressive_sl_price = round(max(0.01, eff_price - 0.02), 4)
-                    sl_resp = self.live_strategy.post_limit_sell(token_id, aggressive_sl_price, size_matched)
+                    sl_resp = self.live_strategy.post_market_sell(token_id, size_matched, min_price=eff_price)
                     if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
                         sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
 
@@ -990,10 +989,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             if exit_qty <= 0:
                 exit_qty = filled_qty
 
-            # STEP B: If Stop-Loss triggered, dispatch aggressive SL sell order on exchange
+            # STEP B: If Stop-Loss triggered, dispatch True Market Sell order (OrderType.FOK) on exchange
             if is_sl_trigger and self.live_strategy and self.live_strategy.clob_client and pos.get("Token_Id"):
-                aggressive_sl_price = round(max(0.01, current_bid - 0.02), 4)
-                sl_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], aggressive_sl_price, exit_qty)
+                sl_resp = self.live_strategy.post_market_sell(pos["Token_Id"], exit_qty, min_price=current_bid)
                 if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
                     sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
 
@@ -1363,6 +1361,44 @@ class LiveExecutionStrategy(IExecutionStrategy):
             return resp if isinstance(resp, dict) else {"orderID": str(resp)}
         except Exception as e:
             logger.error(f"⚠ Failed to post Live CLOB TP Sell Order: {e}")
+            return None
+
+    def post_market_sell(self, token_id: str, size: float, min_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """
+        Posts a True Market Sell Order (OrderType.FOK) on Polymarket CLOB for instant Stop-Loss execution.
+        Falls back to aggressive Taker limit sell if market order payload is unsupported.
+        """
+        if not self.clob_client:
+            return None
+        try:
+            try:
+                from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType, BalanceAllowanceParams, AssetType
+                try:
+                    self.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
+                except Exception as sync_err:
+                    logger.warning(f"Conditional allowance update notice for {token_id[:8]}: {sync_err}")
+
+                exec_price = min_price if (min_price is not None and min_price > 0) else 0.01
+                order_args = MarketOrderArgsV2(
+                    token_id=token_id,
+                    amount=size,
+                    side="SELL",
+                    price=exec_price,
+                    order_type=OrderType.FOK
+                )
+                create_market_fn = getattr(self.clob_client, "create_market_order", None)
+                if create_market_fn:
+                    signed_order = create_market_fn(order_args)
+                    resp = self.clob_client.post_order(signed_order, OrderType.FOK)
+                    logger.info(f"⚡ [LIVE CLOB MARKET SELL EXECUTED] Token={token_id[:8]}... Qty={size:.4f} | Response={resp}")
+                    return resp if isinstance(resp, dict) else {"orderID": str(resp)}
+            except Exception as mkt_err:
+                logger.warning(f"⚠ Market sell order payload notice: {mkt_err}. Falling back to aggressive Limit Sell crossing...")
+
+            limit_price = round(max(0.01, (min_price or 0.05) - 0.02), 4)
+            return self.post_limit_sell(token_id, limit_price, size)
+        except Exception as e:
+            logger.error(f"⚠ Failed to post Live CLOB Market Sell Order: {e}")
             return None
 
     def get_order_from_exchange(self, order_id: str) -> Optional[Dict[str, Any]]:
