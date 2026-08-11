@@ -464,7 +464,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         if delta_odds >= momentum_thresh and min_odds_floor <= current_ask <= max_odds_ceiling:
             if self.live_strategy and self.live_strategy.clob_client:
-                return self.live_strategy.execute_entry(
+                pos = self.live_strategy.execute_entry(
                     candle_start=candle_start,
                     slug=slug,
                     side=side,
@@ -476,6 +476,13 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     current_bid=current_bid,
                     current_ask=current_ask
                 )
+                if pos:
+                    pos["Position_Status"] = "PENDING_FILL"
+                    pos["Order_Timestamp_Sec"] = time.time()
+                    pos["Target_Buy_Price"] = round(max(0.01, current_ask - getattr(config, "v3_maker_offset_cents", 0.02)), 4)
+                    pos["Target_Quantity"] = round(getattr(config, "max_position_size_usd", 2.0) / pos["Target_Buy_Price"], 4) if pos["Target_Buy_Price"] > 0 else 0.0
+                    self.active_position = pos
+                return pos
             return self.execute_entry_v3(
                 candle_start=candle_start,
                 slug=slug,
