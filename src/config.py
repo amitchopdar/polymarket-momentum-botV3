@@ -49,7 +49,7 @@ USER_V2_TRAILING_SL_ENABLED = True         # Enable Trailing Stop Loss based on 
 USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.10  # Trailing SL distance from HWM (10 cents)
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.65       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
 USER_V2_MAX_ENTRY_ODDS_CEILING = 0.92     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
-USER_V2_MAX_POSITION_SIZE_USD = 5.0        # Max position size per trade ($2.00)
+USER_V2_MAX_POSITION_SIZE_USD = 1.0        # Max position size per trade ($1.00)
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
