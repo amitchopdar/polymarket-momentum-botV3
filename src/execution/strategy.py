@@ -470,7 +470,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
             limit_buy_price = round(max(0.01, current_ask - maker_offset), 4)
-            target_qty = round(getattr(config, "max_position_size_usd", 2.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            raw_qty = round(getattr(config, "max_position_size_usd", 4.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            target_qty = max(5.0, raw_qty)
             now_sec = time.time()
             now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1251,7 +1252,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
             entry_odds = current_ask or target_price
             limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
-            target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            raw_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            target_qty = max(5.0, raw_qty)
 
             logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Post-Only Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} Qty={target_qty}")
             order_args = OrderArgs(
