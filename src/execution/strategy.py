@@ -970,6 +970,16 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             if new_sl > sl_price:
                 sl_price = new_sl
                 pos["Stop_Loss_Price"] = sl_price
+        # RETRY PLACING MISSING TP ORDER ON EXCHANGE UNTIL CONFIRMED
+        prev_tp_qty = pos.get("Tp_Qty", 0.0)
+        if self.live_strategy and self.live_strategy.clob_client and (not pos.get("Tp_Order_Id") or prev_tp_qty != filled_qty) and filled_qty > 0:
+            if pos.get("Tp_Order_Id"):
+                self.cancel_order_on_exchange(pos["Tp_Order_Id"])
+            tp_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], tp_price, filled_qty)
+            if tp_resp and isinstance(tp_resp, dict) and ("orderID" in tp_resp or "orderId" in tp_resp):
+                pos["Tp_Order_Id"] = tp_resp.get("orderID") or tp_resp.get("orderId")
+                pos["Tp_Qty"] = filled_qty
+                logger.info(f"🎯 [PERSISTENT TP RETRY SUCCESS] OrderID={pos['Tp_Order_Id']} placed for {filled_qty:.4f} shares.")
 
         is_tp_trigger = current_bid >= tp_price
         is_sl_trigger = current_bid <= sl_price
