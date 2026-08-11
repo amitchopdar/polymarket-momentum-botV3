@@ -463,6 +463,30 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         max_odds_ceiling = getattr(config, "v2_max_entry_odds_ceiling", 0.92)
 
         if delta_odds >= momentum_thresh and min_odds_floor <= current_ask <= max_odds_ceiling:
+            # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
+            maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
+            limit_buy_price = round(max(0.01, current_ask - maker_offset), 4)
+            target_qty = round(getattr(config, "max_position_size_usd", 2.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            now_sec = time.time()
+            now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+            pre_pos = {
+                "Candle_Start": candle_start,
+                "Slug": slug,
+                "Token_Id": token_id,
+                "Position_Side": side,
+                "Entry_Timestamp": now_dt,
+                "Order_Timestamp_Sec": now_sec,
+                "Trigger_Odds_10s_Ago": min_ask_10s,
+                "Entry_Odds": current_ask,
+                "Target_Buy_Price": limit_buy_price,
+                "Target_Quantity": target_qty,
+                "Filled_Quantity": 0.0,
+                "Position_Status": "PENDING_FILL",
+                "Buy_Order_Id": f"V3_MAKER_{int(now_sec*1000)}"
+            }
+            self.active_position = pre_pos
+
             if self.live_strategy and self.live_strategy.clob_client:
                 pos = self.live_strategy.execute_entry(
                     candle_start=candle_start,
@@ -477,12 +501,14 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     current_ask=current_ask
                 )
                 if pos:
-                    pos["Position_Status"] = "PENDING_FILL"
-                    pos["Order_Timestamp_Sec"] = time.time()
-                    pos["Target_Buy_Price"] = round(max(0.01, current_ask - getattr(config, "v3_maker_offset_cents", 0.02)), 4)
-                    pos["Target_Quantity"] = round(getattr(config, "max_position_size_usd", 2.0) / pos["Target_Buy_Price"], 4) if pos["Target_Buy_Price"] > 0 else 0.0
-                    self.active_position = pos
-                return pos
+                    pre_pos.update(pos)
+                    pre_pos["Position_Status"] = "PENDING_FILL"
+                    pre_pos["Order_Timestamp_Sec"] = now_sec
+                    pre_pos["Target_Buy_Price"] = limit_buy_price
+                    pre_pos["Target_Quantity"] = target_qty
+                else:
+                    self.active_position = None
+                return pre_pos
             return self.execute_entry_v3(
                 candle_start=candle_start,
                 slug=slug,
