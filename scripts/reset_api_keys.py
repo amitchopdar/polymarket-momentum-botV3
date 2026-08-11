@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Polymarket CLOB Clean Key Generator (Cloudflare Protected)
-==========================================================
-Uses standard headers and rate-limiting delays to pass Cloudflare checks,
-deriving clean credentials for signature_type = 1 and signature_type = 2.
+Polymarket CLOB Fresh Nonce Key Generator (V5)
+==============================================
+Forces creation of fresh API Key Nonces (nonce=1, 2, 3) to bypass stale nonce=0,
+and tests live order placement across signature_type = 1, 2, 3.
 """
 
 import os
@@ -27,7 +27,7 @@ private_key = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip("\"' ")
 funder = os.getenv("POLYMARKET_FUNDER", "").strip("\"' ") or None
 
 print("=" * 70)
-print("  POLYMARKET CLOB CLEAN KEY GENERATOR (V4)")
+print("  POLYMARKET CLOB FRESH NONCE KEY GENERATOR (V5)")
 print("=" * 70)
 print(f"🔑 Private Key: 0x{private_key[2:6]}..." if private_key else "❌ Private Key missing!")
 print(f"📦 Deposit Wallet (funder): {funder}")
@@ -38,73 +38,75 @@ if not private_key or not funder:
 
 host = "https://clob.polymarket.com"
 
-# Candidate signature types for Deposit Wallets
+# Signature candidates for Deposit Wallets
 sig_candidates = [1, 2, 3]
 dummy_token = "60071130405041607714679803984580413572787897674829718027387574381836360117448"
 successful_config = None
 
 for st in sig_candidates:
     print(f"\n----------------------------------------------------------------------")
-    print(f"🧪 Testing signature_type={st} with 1.5s rate-limit delay...")
+    print(f"🧪 Testing signature_type={st}...")
     time.sleep(1.5)
     
-    try:
-        client = ClobClient(
-            host=host,
-            key=private_key,
-            chain_id=137,
-            signature_type=st,
-            funder=funder
-        )
-        
-        creds = None
-        # Try nonces 0, 1, 2
-        for n in range(3):
-            time.sleep(1.0)
-            try:
-                c_creds = client.create_api_key(nonce=n)
-                print(f"  🎉 Created API Key (nonce={n}): {c_creds.api_key[:12]}...")
-                creds = c_creds
-                break
-            except Exception:
-                try:
-                    d_creds = client.derive_api_key(nonce=n)
-                    print(f"  ℹ Derived API Key (nonce={n}): {d_creds.api_key[:12]}...")
-                    creds = d_creds
-                    break
-                except Exception:
-                    pass
-
-        if not creds:
-            print(f"  ❌ Could not resolve API keys for signature_type={st}")
-            continue
-
+    client = ClobClient(
+        host=host,
+        key=private_key,
+        chain_id=137,
+        signature_type=st,
+        funder=funder
+    )
+    
+    # Force creating fresh nonces (nonce 1, 2, 3, 4)
+    creds_candidates = []
+    for n in range(1, 5):
         time.sleep(1.0)
-        print(f"  ⏳ Testing live order with API Key {creds.api_key[:8]}... (sig_type={st})")
-        test_client = ClobClient(
-            host=host,
-            key=private_key,
-            chain_id=137,
-            creds=creds,
-            signature_type=st,
-            funder=funder
-        )
-        order_args = OrderArgsV2(price=0.01, size=5.0, side="BUY", token_id=dummy_token)
-        signed_order = test_client.create_order(order_args)
-        resp = test_client.post_order(signed_order, OrderType.GTC)
-        print(f"  🎉 LIVE ORDER POST SUCCESSFUL! Order response: {resp}")
-        if isinstance(resp, dict) and "orderID" in resp:
-            cancel_resp = test_client.cancel_order(resp["orderID"])
-            print(f"     Cancelled test order: {cancel_resp}")
-        
-        successful_config = (st, creds)
+        try:
+            c_creds = client.create_api_key(nonce=n)
+            print(f"  🎉 Created BRAND NEW API Key (nonce={n}): {c_creds.api_key[:12]}...")
+            creds_candidates.append(c_creds)
+        except Exception as e_create:
+            try:
+                d_creds = client.derive_api_key(nonce=n)
+                print(f"  ℹ Derived existing API Key (nonce={n}): {d_creds.api_key[:12]}...")
+                creds_candidates.append(d_creds)
+            except Exception:
+                pass
+
+    if not creds_candidates:
+        print(f"  ❌ Could not create any fresh API keys for signature_type={st}")
+        continue
+
+    for creds in creds_candidates:
+        time.sleep(1.0)
+        print(f"  ⏳ Testing live order with Fresh API Key {creds.api_key[:8]}... (sig_type={st})")
+        try:
+            test_client = ClobClient(
+                host=host,
+                key=private_key,
+                chain_id=137,
+                creds=creds,
+                signature_type=st,
+                funder=funder
+            )
+            order_args = OrderArgsV2(price=0.01, size=5.0, side="BUY", token_id=dummy_token)
+            signed_order = test_client.create_order(order_args)
+            resp = test_client.post_order(signed_order, OrderType.GTC)
+            print(f"  🎉 LIVE ORDER POST SUCCESSFUL! Order response: {resp}")
+            if isinstance(resp, dict) and "orderID" in resp:
+                cancel_resp = test_client.cancel_order(resp["orderID"])
+                print(f"     Cancelled test order: {cancel_resp}")
+            
+            successful_config = (st, creds)
+            break
+        except Exception as order_err:
+            print(f"     ❌ Order post failed: {order_err}")
+
+    if successful_config:
         break
-    except Exception as order_err:
-        print(f"     ❌ Order post failed: {order_err}")
 
 if not successful_config:
     print("\n" + "=" * 70)
-    print("❌ Rate limited by Cloudflare or signature type mismatch.")
+    print("❌ Could not find working signature_type and fresh API key.")
     print("======================================================================")
     sys.exit(1)
 
@@ -153,6 +155,6 @@ if os.path.exists(env_path):
     with open(env_path, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
 
-    print(f"✅ .env file successfully updated with verified working credentials!")
+    print(f"✅ .env file successfully updated with fresh working credentials!")
     print(f"   Saved at: {env_path}")
     print("=" * 70)
