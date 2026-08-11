@@ -1424,6 +1424,16 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 cancel_fn = getattr(self.clob_client, "cancel_orders", None)
                 if cancel_fn:
                     resp = cancel_fn([buy_order_id])
+                    if isinstance(resp, dict):
+                        canceled_list = resp.get("canceled", [])
+                        not_canceled_map = resp.get("not_canceled", {})
+                        if buy_order_id in canceled_list or str(buy_order_id) in canceled_list:
+                            logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} confirmed cancelled on exchange.")
+                            return True
+                        elif buy_order_id in not_canceled_map or str(buy_order_id) in not_canceled_map:
+                            reason = not_canceled_map.get(buy_order_id) or not_canceled_map.get(str(buy_order_id))
+                            logger.info(f"ℹ [CLOB CANCEL NOTICE] OrderID={buy_order_id}: {reason}")
+                            return True
                     logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} | Response={resp}")
                     return True
                 else:
