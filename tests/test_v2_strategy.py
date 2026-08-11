@@ -91,7 +91,7 @@ def test_v2_high_odds_tp_target(memory_db):
     pos = strat.active_position
 
     assert pos["Entry_Odds"] == 0.82
-    assert pos["Take_Profit_Price"] == 0.995  # Fixed $0.995 target for entry >= $0.80 cutoff
+    assert pos["Take_Profit_Price"] == 0.99  # Fixed $0.99 max exchange limit target for entry >= $0.80 cutoff
     assert pos["Stop_Loss_Price"] == 0.71  # Initial SL from peak HWM = $0.81
 
 def test_v2_single_position_guard(memory_db):

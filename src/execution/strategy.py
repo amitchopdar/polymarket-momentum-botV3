@@ -763,12 +763,13 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if size_matched > 0:
             fill_price = limit_buy_price
             high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
-            high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.995)
+            high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
             tp_cents = getattr(config, "v2_take_profit_cents", 0.05)
             trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
 
             stop_loss_price = round(max(0.01, fill_price - trailing_dist), 4)
-            take_profit_price = high_odds_tp if fill_price >= high_odds_cutoff else round(min(high_odds_tp, fill_price + tp_cents), 4)
+            raw_tp = high_odds_tp if fill_price >= high_odds_cutoff else round(min(high_odds_tp, fill_price + tp_cents), 4)
+            take_profit_price = round(min(0.9900, raw_tp), 4)
 
             pos["Average_Fill_Price"] = fill_price
             pos["Filled_Quantity"] = size_matched
