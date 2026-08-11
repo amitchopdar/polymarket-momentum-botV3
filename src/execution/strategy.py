@@ -9,7 +9,7 @@ import os
 import time
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timezone
 
 from src.config import config
@@ -1109,35 +1109,63 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 # Polymarket ERC-1271 Deposit Wallet smart contract flow requires signature_type=3 (POLY_1271)
                 sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3" if funder else "0").strip("\"' "))
                 host = getattr(config, "polymarket_clob_url", "https://clob.polymarket.com")
-                # Always force fresh L2 API key derivation for signature_type=3 + funder (Deposit Wallet)
-                logger.info(f"🔑 [L1 AUTH] Initializing EIP-712 L1 Auth Client (signature_type={sig_type}, funder={funder[:10] if funder else 'None'})...")
-                temp_client = ClobClient(
-                    host=host,
-                    key=private_key,
-                    chain_id=137,
-                    signature_type=sig_type,
-                    funder=funder
-                )
-                logger.info("🔑 [L2 CREDS] Auto-deriving CLOB HMAC API Credentials for Deposit Wallet...")
-                derive_fn = getattr(temp_client, "create_or_derive_api_key", getattr(temp_client, "create_or_derive_api_creds", None))
-                if derive_fn:
-                    derived_creds = derive_fn()
-                    if derived_creds:
-                        creds = ApiCreds(
-                            api_key=derived_creds.api_key,
-                            api_secret=derived_creds.api_secret,
-                            api_passphrase=derived_creds.api_passphrase
-                        )
-                        logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key bound to Deposit Wallet: {creds.api_key[:8]}...")
 
+                # Create a SINGLE ClobClient instance (avoids OrderBuilder state mismatch)
+                logger.info(f"🔑 [L1 AUTH] Initializing EIP-712 L1 Auth Client (signature_type={sig_type}, funder={funder[:10] if funder else 'None'})...")
                 self.clob_client = ClobClient(
                     host=host,
                     key=private_key,
                     chain_id=137,
-                    creds=creds,
                     signature_type=sig_type,
                     funder=funder
                 )
+
+                # API Credential Resolution (Priority Order):
+                # 1. Manual .env credentials (REQUIRED for Deposit Wallet / signature_type=3)
+                # 2. Auto-derivation fallback (only works for EOA / signature_type=0)
+                #
+                # WHY: derive_api_key() uses L1 headers signed by the EOA (signer.address()).
+                # The API key is therefore bound to the EOA address. But with signature_type=3,
+                # orders are signed with the FUNDER address (_v2_order_signer returns self.funder).
+                # This address mismatch causes: "the order signer address has to be the address of the API KEY"
+                # Solution: For Deposit Wallet, you MUST provide pre-generated API creds from Polymarket UI.
+                creds = None
+
+                if api_key and secret and passphrase:
+                    # Priority 1: Use manually provided API credentials from .env
+                    creds = ApiCreds(
+                        api_key=api_key,
+                        api_secret=secret,
+                        api_passphrase=passphrase
+                    )
+                    logger.info(f"🔑 [L2 CREDS] Using manually provided API credentials from .env: {api_key[:8]}...")
+                else:
+                    # Priority 2: Auto-derive API credentials on this same ClobClient instance
+                    mode_label = "Deposit Wallet" if (sig_type == 3 and funder) else "EOA"
+                    logger.info(f"🔑 [L2 CREDS] Auto-deriving CLOB API Credentials ({mode_label} mode)...")
+                    if sig_type == 3 and funder:
+                        logger.warning(
+                            "⚠ Auto-deriving API credentials for Deposit Wallet. If orders fail with "
+                            "'signer address' errors, run: python scripts/derive_api_keys.py "
+                            "and add the output to your .env file."
+                        )
+                    derive_fn = getattr(self.clob_client, "create_or_derive_api_key", getattr(self.clob_client, "derive_api_key", None))
+                    if derive_fn:
+                        derived_creds = derive_fn()
+                        if derived_creds:
+                            creds = ApiCreds(
+                                api_key=derived_creds.api_key,
+                                api_secret=derived_creds.api_secret,
+                                api_passphrase=derived_creds.api_passphrase
+                            )
+                            logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
+
+                if creds:
+                    self.clob_client.set_api_creds(creds)
+                else:
+                    logger.warning("⚠ No valid API credentials resolved. CLOB client will not be able to place orders.")
+                    self.clob_client = None
+                    return
 
                 # Synchronize CLOB Balance & Allowance Cache
                 try:
@@ -1150,6 +1178,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 logger.info(f"⚡ [LIVE CLOB CLIENT] Successfully initialized authenticated Polymarket CLOB client (signature_type={sig_type}).")
             except Exception as e:
                 logger.warning(f"Failed to initialize py-clob-client SDK: {e}. Live fallback to DryExecutionStrategy.")
+                self.clob_client = None
 
     def execute_entry(
         self,
@@ -1190,16 +1219,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 side="BUY",
                 token_id=token_id
             )
-            try:
-                signed_order = self.clob_client.create_order(order_args)
-                resp = self.clob_client.post_order(signed_order, OrderType.GTC)
-            except Exception as first_err:
-                logger.warning(f"⚠ Initial order post failed ({first_err}). Retrying with Deposit Wallet Flow (signature_type=3 POLY_1271)...")
-                if hasattr(self.clob_client, "builder"):
-                    setattr(self.clob_client.builder, "signature_type", 3)
-                    setattr(self.clob_client.builder, "sig_type", 3)
-                signed_order = self.clob_client.create_order(order_args)
-                resp = self.clob_client.post_order(signed_order, OrderType.GTC)
+            signed_order = self.clob_client.create_order(order_args)
+            resp = self.clob_client.post_order(signed_order, OrderType.GTC)
 
             pos = self.dry_strategy.execute_entry(
                 candle_start, slug, side, prob_cal, prob_uncal, limit_buy_price,
