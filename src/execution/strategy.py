@@ -1106,8 +1106,10 @@ class LiveExecutionStrategy(IExecutionStrategy):
                     from py_clob_client.client import ClobClient
                     from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
-                # Polymarket ERC-1271 Deposit Wallet smart contract flow requires signature_type=3 (POLY_1271)
-                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3" if funder else "0").strip("\"' "))
+                # Polymarket Deposit Wallet = Proxy Wallet → signature_type=1 (POLY_PROXY)
+                # POLY_PROXY (1): Order signer = EOA address (matches API key) | maker = funder
+                # POLY_1271 (3): Order signer = funder address (MISMATCHES API key) ← WRONG
+                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "1" if funder else "0").strip("\"' "))
                 host = getattr(config, "polymarket_clob_url", "https://clob.polymarket.com")
 
                 # Create a SINGLE ClobClient instance (avoids OrderBuilder state mismatch)
