@@ -8,6 +8,7 @@ with your REAL Deposit Wallet (0x3F6605D1909139a6482136Cb61f191EB887aD1A2) under
 
 import os
 import sys
+import json
 import requests
 
 # Auto-load .env
@@ -42,27 +43,21 @@ host = "https://clob.polymarket.com"
 print("\n⏳ Fetching active live market token ID from Polymarket Gamma API...")
 active_token_id = None
 try:
-    resp = requests.get("https://gamma-api.polymarket.com/events?limit=5&active=true&closed=false", timeout=10)
-    events = resp.json()
-    for ev in events:
-        markets = ev.get("markets", [])
-        for m in markets:
-            clob_token_ids = m.get("clobTokenIds")
-            if clob_token_ids and isinstance(clob_token_ids, list) and len(clob_token_ids) > 0:
-                # Remove quotes if JSON string
-                t0 = str(clob_token_ids[0]).strip("\"' ")
-                if t0 and len(t0) > 10:
-                    active_token_id = t0
-                    print(f"✅ Found active live market token ID: {active_token_id[:20]}...")
-                    break
-        if active_token_id:
-            break
+    resp = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=10", timeout=10)
+    data = resp.json()
+    for m in data:
+        tokens_raw = m.get("clobTokenIds")
+        if tokens_raw:
+            tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+            if tokens and len(tokens) > 0:
+                active_token_id = str(tokens[0]).strip("\"' ")
+                print(f"✅ Found active live market token ID: {active_token_id[:25]}...")
+                break
 except Exception as e:
     print(f"⚠ Could not fetch live token from Gamma API: {e}")
 
 if not active_token_id:
-    # Fallback to known active BTC 5m token
-    active_token_id = "31723699192941211178455024970356223830934651306167899041269965226974472909180"
+    active_token_id = "32338220190071351435772801779725302244575775216413325951443816017994629993401"
 
 # Step 2: Initialize Level 1 client with REAL funder and signature_type=3 (POLY_1271)
 print("\n⏳ Initializing Level 1 Auth Client (signature_type=3, POLY_1271)...")
@@ -86,7 +81,7 @@ except Exception as e:
     sys.exit(1)
 
 # Step 4: Test live order placement with signature_type=3 (POLY_1271)
-print(f"\n⏳ Testing live order placement with signature_type=3 (POLY_1271) on token {active_token_id[:15]}...")
+print(f"\n⏳ Testing live order placement with signature_type=3 (POLY_1271) on token {active_token_id[:20]}...")
 try:
     test_client = ClobClient(
         host=host,
