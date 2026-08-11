@@ -1244,19 +1244,65 @@ class LiveExecutionStrategy(IExecutionStrategy):
             signed_order = self.clob_client.create_order(order_args)
             resp = self.clob_client.post_order(signed_order, OrderType.GTC)
 
-            pos = self.dry_strategy.execute_entry(
-                candle_start, slug, side, prob_cal, prob_uncal, limit_buy_price,
-                position_usd, token_id, current_bid, current_ask
-            )
-            if pos and isinstance(resp, dict) and "orderID" in resp:
-                pos["Buy_Order_Id"] = resp["orderID"]
+            order_id = None
+            if isinstance(resp, dict):
+                order_id = resp.get("orderID") or resp.get("orderId")
+            elif isinstance(resp, str) and resp.startswith("0x"):
+                order_id = resp
+
+            if not order_id:
+                logger.error(f"❌ [LIVE CLOB ORDER REJECTED] Response: {resp}")
+                return None
+
+            now_ts = time.time()
+            now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+            pos = {
+                "Candle_Start": candle_start,
+                "Slug": slug,
+                "Token_Id": token_id,
+                "Position_Side": side,
+                "Entry_Timestamp": now_dt,
+                "Order_Timestamp_Sec": now_ts,
+                "Trigger_Odds_10s_Ago": target_price,
+                "Entry_Odds": entry_odds,
+                "Target_Buy_Price": limit_buy_price,
+                "Target_Quantity": target_qty,
+                "Filled_Quantity": 0.0,
+                "Sell_Quantity": 0.0,
+                "Average_Fill_Price": None,
+                "Take_Profit_Price": round(limit_buy_price + getattr(config, "v2_take_profit_cents", 0.05), 4),
+                "Stop_Loss_Price": round(max(0.01, limit_buy_price - getattr(config, "v2_trailing_sl_distance_cents", 0.10)), 4),
+                "Buy_Order_Id": order_id,
+                "Order_Id": order_id,
+                "Position_Status": "PENDING_FILL",
+                "Cancel_Reason": None,
+                "Pnl": 0.0,
+                "Updated_At": now_dt
+            }
+
+            logger.info(f"🎯 [LIVE CLOB ORDER PLACED 200 OK] OrderID={order_id} | Side={side} | Price=${limit_buy_price:.4f} | Qty={target_qty}")
+
+            # Dispatch Telegram entry notification directly for Live CLOB Order
+            if hasattr(self, "notifier") and self.notifier:
+                try:
+                    self.notifier.notify_v2_trade_entry(
+                        candle_start=candle_start,
+                        side=side,
+                        signal_price=entry_odds,
+                        fill_price=limit_buy_price,
+                        tp_price=pos["Take_Profit_Price"],
+                        sl_price=pos["Stop_Loss_Price"],
+                        qty=target_qty,
+                        position_usd=position_usd
+                    )
+                except Exception as e:
+                    logger.warning(f"Notifier error: {e}")
+
             return pos
         except Exception as e:
-            logger.error(f"Failed to post Live CLOB Order: {e}. Fallback to DryExecutionStrategy.")
-            return self.dry_strategy.execute_entry(
-                candle_start, slug, side, prob_cal, prob_uncal, target_price,
-                position_usd, token_id, current_bid, current_ask
-            )
+            logger.error(f"Failed to post Live CLOB Order: {e}. Strict Live Mode: Returning None to prevent duplicate/broken positions.")
+            return None
 
     def execute_exit(
         self,
