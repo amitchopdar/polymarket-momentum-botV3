@@ -434,11 +434,11 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             self._close_expired_position(current_bid or current_ask)
 
         # 1. Evaluate active PENDING_FILL order for Maker fills or 5s timeouts
-        if self.active_position and self.active_position.get("Position_Status") == "PENDING_FILL":
+        if self.active_position and self.active_position.get("Position_Status") == "PENDING_FILL" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_pending_fill(current_bid, current_ask)
 
         # 2. Evaluate active CLOSING position for sell fill confirmation on exchange
-        if self.active_position and self.active_position.get("Position_Status") == "CLOSING":
+        if self.active_position and self.active_position.get("Position_Status") == "CLOSING" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_closing_position(current_bid, current_ask)
 
         # 3. Evaluate TP/SL exit if this token has an active open position
