@@ -801,7 +801,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
                 if hasattr(self, "notifier") and self.notifier:
                     try:
-                        self.notifier.notify_v2_trade_exit(candle_start=candle_start, side=pos.get("Position_Side", "UP"), exit_reason="STOP_LOSS", exit_price=stop_loss_price, pnl=-0.50)
+                        self.notifier.notify_v2_trade_exit(candle_start, pos.get("Position_Side", "UP"), stop_loss_price, "STOP_LOSS", -0.50)
                     except Exception as e:
                         logger.warning(f"Notifier error: {e}")
 
@@ -1316,12 +1316,17 @@ class LiveExecutionStrategy(IExecutionStrategy):
     def post_limit_sell(self, token_id: str, price: float, size: float) -> Optional[Dict[str, Any]]:
         """
         Posts a physical Resting Limit Sell Order at Take_Profit_Price on Polymarket CLOB.
+        Synchronizes AssetType.CONDITIONAL token balance & allowance cache prior to dispatch.
         """
         if not self.clob_client:
             return None
         try:
             try:
-                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
+                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType, BalanceAllowanceParams, AssetType
+                try:
+                    self.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
+                except Exception as sync_err:
+                    logger.warning(f"Conditional allowance update notice for {token_id[:8]}: {sync_err}")
             except ImportError:
                 from py_clob_client.clob_types import OrderArgs, OrderType
 
@@ -1357,11 +1362,17 @@ class LiveExecutionStrategy(IExecutionStrategy):
     def cancel_order_on_exchange(self, buy_order_id: str) -> bool:
         if self.clob_client and buy_order_id:
             try:
-                cancel_fn = getattr(self.clob_client, "cancel_order", getattr(self.clob_client, "cancel", None))
+                cancel_fn = getattr(self.clob_client, "cancel_orders", None)
                 if cancel_fn:
-                    resp = cancel_fn(buy_order_id)
+                    resp = cancel_fn([buy_order_id])
                     logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} | Response={resp}")
                     return True
+                else:
+                    cancel_single = getattr(self.clob_client, "cancel_order", getattr(self.clob_client, "cancel", None))
+                    if cancel_single:
+                        resp = cancel_single(buy_order_id)
+                        logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} | Response={resp}")
+                        return True
             except Exception as e:
                 logger.error(f"⚠ Failed physical CLOB order cancellation for {buy_order_id}: {e}")
         return False
