@@ -785,7 +785,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             pos["High_Water_Mark"] = hwm
             pos["Position_Status"] = "OPEN"
             # SUB-5s STOP-LOSS CHECK: If size_matched > 0 AND price <= stop_loss_price
-            if eff_price is not None and eff_price <= stop_loss_price:
+            if size_matched > 0 and eff_price is not None and eff_price <= stop_loss_price:
                 logger.warning(
                     f"🚨 [SUB-5s STOP-LOSS TRIGGERED] Price ${eff_price:.4f} <= SL ${stop_loss_price:.4f}! "
                     f"Executing instant exit for {size_matched:.4f} shares..."
