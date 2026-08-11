@@ -795,9 +795,12 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 if pos.get("Tp_Order_Id"):
                     self.cancel_order_on_exchange(pos["Tp_Order_Id"])
 
+                slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
+                limit_sell_price = round(max(0.01, stop_loss_price - slippage), 4)
+
                 sell_order_id = f"V3_SL_{int(now_sec*1000)}"
                 if self.live_strategy and self.live_strategy.clob_client and token_id:
-                    sl_resp = self.live_strategy.post_market_sell(token_id, size_matched, min_price=eff_price)
+                    sl_resp = self.live_strategy.post_limit_sell(token_id, limit_sell_price, size_matched)
                     if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
                         sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
 
@@ -805,7 +808,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 pos["Closing_Timestamp_Sec"] = now_sec
                 pos["Exit_Reason"] = "STOP_LOSS"
                 pos["Trade_Outcome"] = "STOP_LOSS_HIT"
-                pos["Exit_Price"] = stop_loss_price
+                pos["Exit_Price"] = limit_sell_price
+                pos["Sell_Limit_Price"] = limit_sell_price
                 pos["Exit_Timestamp"] = now_dt
                 pos["Sell_Order_Id"] = sell_order_id
                 pos["Exit_Quantity"] = size_matched
@@ -906,7 +910,38 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         else:
             is_filled = True  # Simulation / dry-run fallback
 
-        if is_filled or elapsed_sec >= 5.0:
+        if not is_filled and self.live_strategy and self.live_strategy.clob_client and sell_order_id and not str(sell_order_id).startswith("V3_"):
+            cur_limit_price = pos.get("Sell_Limit_Price") or pos.get("Exit_Price", 0.0)
+            slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
+            should_rechase = False
+
+            if current_bid is not None and current_bid <= (cur_limit_price - 0.01):
+                should_rechase = True
+            elif elapsed_sec >= 3.0:
+                should_rechase = True
+
+            if should_rechase:
+                logger.info(f"🔄 [DYNAMIC RE-CHASE TRIGGERED] Market price dropped (Bid: ${current_bid}) below Limit Sell ${cur_limit_price:.4f}. Re-pricing SL order...")
+                self.cancel_order_on_exchange(sell_order_id)
+                check_info = self.live_strategy.get_order_from_exchange(sell_order_id)
+                if check_info and isinstance(check_info, dict):
+                    c_status = str(check_info.get("status", "")).upper()
+                    c_matched = round(float(check_info.get("size_matched") or check_info.get("sizeMatched") or 0.0), 4)
+                    if c_status in ("MATCHED", "FILLED") or c_matched >= (exit_qty - 0.01):
+                        is_filled = True
+
+                if not is_filled and pos.get("Token_Id"):
+                    remaining_qty = exit_qty
+                    new_limit_price = round(max(0.01, (current_bid or cur_limit_price) - slippage), 4)
+                    new_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], new_limit_price, remaining_qty)
+                    if new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
+                        new_id = new_resp.get("orderID") or new_resp.get("orderId")
+                        pos["Sell_Order_Id"] = new_id
+                        pos["Sell_Limit_Price"] = new_limit_price
+                        pos["Closing_Timestamp_Sec"] = now_sec
+                        logger.info(f"🎯 [RE-CHASE SL ORDER DISPATCHED] OrderID={new_id} Price=${new_limit_price:.4f} Qty={remaining_qty:.4f}")
+
+        if is_filled:
             pos["Position_Status"] = "CLOSED"
             exit_price = pos.get("Exit_Price", 0.0)
             exit_reason = pos.get("Exit_Reason", "STOP_LOSS")
@@ -1016,11 +1051,18 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             if exit_qty <= 0:
                 exit_qty = filled_qty
 
-            # STEP B: If Stop-Loss triggered, dispatch True Market Sell order (OrderType.FOK) on exchange
-            if is_sl_trigger and self.live_strategy and self.live_strategy.clob_client and pos.get("Token_Id"):
-                sl_resp = self.live_strategy.post_market_sell(pos["Token_Id"], exit_qty, min_price=current_bid)
-                if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
-                    sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
+            # STEP B: If Stop-Loss triggered, dispatch Limit Sell SL order (SL_Price - Slippage) on exchange
+            if is_sl_trigger:
+                slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
+                limit_sell_price = round(max(0.01, sl_price - slippage), 4)
+                exit_price = limit_sell_price
+
+                if self.live_strategy and self.live_strategy.clob_client and pos.get("Token_Id"):
+                    sl_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], limit_sell_price, exit_qty)
+                    if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
+                        sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
+
+                pos["Sell_Limit_Price"] = limit_sell_price
 
             new_sell_qty = round(prev_sell_qty + exit_qty, 4)
             pos["Sell_Quantity"] = new_sell_qty
@@ -1385,48 +1427,10 @@ class LiveExecutionStrategy(IExecutionStrategy):
             )
             signed_order = self.clob_client.create_order(order_args)
             resp = self.clob_client.post_order(signed_order, OrderType.GTC)
-            logger.info(f"🎯 [LIVE CLOB TP ORDER PLACED] Token={token_id[:8]}... Price=${price:.4f} Qty={size:.4f} | OrderID={resp.get('orderID') if isinstance(resp, dict) else resp}")
+            logger.info(f"🎯 [LIVE CLOB LIMIT SELL PLACED] Token={token_id[:8]}... Price=${price:.4f} Qty={size:.4f} | OrderID={resp.get('orderID') if isinstance(resp, dict) else resp}")
             return resp if isinstance(resp, dict) else {"orderID": str(resp)}
         except Exception as e:
-            logger.error(f"⚠ Failed to post Live CLOB TP Sell Order: {e}")
-            return None
-
-    def post_market_sell(self, token_id: str, size: float, min_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        """
-        Posts a True Market Sell Order (OrderType.FOK) on Polymarket CLOB for instant Stop-Loss execution.
-        Falls back to aggressive Taker limit sell if market order payload is unsupported.
-        """
-        if not self.clob_client:
-            return None
-        try:
-            try:
-                from py_clob_client_v2.clob_types import MarketOrderArgsV2, OrderType, BalanceAllowanceParams, AssetType
-                try:
-                    self.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
-                except Exception as sync_err:
-                    logger.warning(f"Conditional allowance update notice for {token_id[:8]}: {sync_err}")
-
-                exec_price = min_price if (min_price is not None and min_price > 0) else 0.01
-                order_args = MarketOrderArgsV2(
-                    token_id=token_id,
-                    amount=size,
-                    side="SELL",
-                    price=exec_price,
-                    order_type=OrderType.FOK
-                )
-                create_market_fn = getattr(self.clob_client, "create_market_order", None)
-                if create_market_fn:
-                    signed_order = create_market_fn(order_args)
-                    resp = self.clob_client.post_order(signed_order, OrderType.FOK)
-                    logger.info(f"⚡ [LIVE CLOB MARKET SELL EXECUTED] Token={token_id[:8]}... Qty={size:.4f} | Response={resp}")
-                    return resp if isinstance(resp, dict) else {"orderID": str(resp)}
-            except Exception as mkt_err:
-                logger.warning(f"⚠ Market sell order payload notice: {mkt_err}. Falling back to aggressive Limit Sell crossing...")
-
-            limit_price = round(max(0.01, (min_price or 0.05) - 0.02), 4)
-            return self.post_limit_sell(token_id, limit_price, size)
-        except Exception as e:
-            logger.error(f"⚠ Failed to post Live CLOB Market Sell Order: {e}")
+            logger.error(f"⚠ Failed to post Live CLOB Limit Sell Order: {e}")
             return None
 
     def get_order_from_exchange(self, order_id: str) -> Optional[Dict[str, Any]]:

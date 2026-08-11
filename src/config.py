@@ -47,6 +47,7 @@ USER_V2_HIGH_ODDS_CUTOFF = 0.80            # High odds cutoff threshold for Tier
 USER_V2_HIGH_ODDS_TP_TARGET = 0.9900        # Fixed TP target price for Tier 2 ($0.99 / $1.00 max exchange limit price)
 USER_V2_TRAILING_SL_ENABLED = True         # Enable Trailing Stop Loss based on High Water Mark
 USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.10  # Trailing SL distance from HWM (10 cents)
+USER_V2_STOP_LOSS_SLIPPAGE_CENTS = 0.02   # Stop Loss exit slippage for Limit Sell orders (2 cents)
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.65       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
 USER_V2_MAX_ENTRY_ODDS_CEILING = 0.92     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
 USER_V2_MAX_POSITION_SIZE_USD = 4.0        # Max position size per trade ($4.00 - min 5 shares on Polymarket)
@@ -85,6 +86,7 @@ class AppConfig:
     v2_high_odds_tp_target: float = field(default_factory=lambda: float(os.getenv("V2_HIGH_ODDS_TP_TARGET", str(USER_V2_HIGH_ODDS_TP_TARGET))))
     v2_trailing_sl_enabled: bool = field(default_factory=lambda: os.getenv("V2_TRAILING_SL_ENABLED", "TRUE").upper() == "TRUE")
     v2_trailing_sl_distance_cents: float = field(default_factory=lambda: float(os.getenv("V2_TRAILING_SL_DISTANCE_CENTS", str(USER_V2_TRAILING_SL_DISTANCE_CENTS))))
+    v2_stop_loss_slippage_cents: float = field(default_factory=lambda: float(os.getenv("V2_STOP_LOSS_SLIPPAGE_CENTS", str(USER_V2_STOP_LOSS_SLIPPAGE_CENTS))))
     v2_min_entry_odds_floor: float = field(default_factory=lambda: float(os.getenv("V2_MIN_ENTRY_ODDS_FLOOR", str(USER_V2_MIN_ENTRY_ODDS_FLOOR))))
     v2_max_entry_odds_ceiling: float = field(default_factory=lambda: float(os.getenv("V2_MAX_ENTRY_ODDS_CEILING", str(USER_V2_MAX_ENTRY_ODDS_CEILING))))
     max_position_size_usd: float = field(default_factory=lambda: float(os.getenv("MAX_POSITION_SIZE_USD", str(USER_V2_MAX_POSITION_SIZE_USD))))
