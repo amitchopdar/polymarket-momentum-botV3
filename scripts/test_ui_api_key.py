@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Polymarket UI API Key Test Script
-=================================
-Tests live order placement using the UI-generated API key and its associated Address.
+Polymarket Relayer/Deposit Address API Key Auto-Derivation & Order Verification Tool
+====================================================================================
+Uses your Relayer Address (0x2bbaffa9e3dde8be2413b349c787aa6daf7246e2) with Level 1 Auth
+to auto-derive the matching API Key, Secret, and Passphrase, and test live order placement.
 """
 
 import os
 import sys
+import time
 
 # Auto-load .env
 _env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
@@ -24,17 +26,11 @@ from py_clob_client_v2.clob_types import ApiCreds, OrderArgsV2, OrderType
 private_key = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip("\"' ")
 funder = os.getenv("POLYMARKET_FUNDER", "").strip("\"' ") or None
 
-# Also allow passing API key & funder from prompt
-api_key = os.getenv("POLYMARKET_API_KEY", "").strip("\"' ")
-secret = os.getenv("POLYMARKET_SECRET", "").strip("\"' ")
-passphrase = os.getenv("POLYMARKET_PASSPHRASE", "").strip("\"' ")
-
 print("=" * 70)
-print("  POLYMARKET UI API KEY VERIFICATION TEST")
+print("  POLYMARKET RELAYER API KEY AUTO-DERIVATION & ORDER VERIFICATION TOOL")
 print("=" * 70)
 print(f"🔑 Private Key: 0x{private_key[2:6]}..." if private_key else "❌ Private Key missing!")
-print(f"📦 Deposit/Relayer Address (funder): {funder}")
-print(f"🔑 UI API Key: {api_key}")
+print(f"📦 Relayer Address (funder): {funder}")
 
 if not private_key or not funder:
     print("❌ Both POLYMARKET_PRIVATE_KEY and POLYMARKET_FUNDER are required.")
@@ -42,7 +38,8 @@ if not private_key or not funder:
 
 host = "https://clob.polymarket.com"
 
-# Derive secret/passphrase deterministically if missing
+# Step 1: Initialize Level 1 client with Relayer Address and signature_type=1 (POLY_PROXY)
+print("\n⏳ Initializing Level 1 Auth Client for Relayer Address (signature_type=1, POLY_PROXY)...")
 l1_client = ClobClient(
     host=host,
     key=private_key,
@@ -51,20 +48,21 @@ l1_client = ClobClient(
     funder=funder
 )
 
-if not secret or not passphrase:
-    print("⏳ Deriving HMAC Secret & Passphrase deterministically from wallet...")
-    try:
-        derived = l1_client.create_or_derive_api_key()
-        secret = derived.api_secret
-        passphrase = derived.api_passphrase
-        print(f"✅ Resolved Secret: {secret[:8]}...")
-    except Exception as e:
-        print(f"⚠ Derivation notice: {e}")
+# Step 2: Derive matching L2 API credentials directly from Polymarket server
+print("⏳ Auto-deriving matching CLOB HMAC API Credentials from Polymarket server...")
+creds = None
+try:
+    creds = l1_client.create_or_derive_api_key()
+    print(f"🎉 API CREDENTIALS DERIVED SUCCESSFULLY!")
+    print(f"   API Key    : {creds.api_key}")
+    print(f"   API Secret : {creds.api_secret[:12]}...")
+    print(f"   Passphrase : {creds.api_passphrase[:12]}...")
+except Exception as e:
+    print(f"❌ Could not derive API credentials: {e}")
+    sys.exit(1)
 
-creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase)
-
+# Step 3: Test live order placement using derived matching credentials
 dummy_token = "60071130405041607714679803984580413572787897674829718027387574381836360117448"
-
 sig_candidates = [1, 2, 3, 0]
 successful_sig = None
 
@@ -93,5 +91,48 @@ for st in sig_candidates:
 
 if successful_sig is not None:
     print("\n" + "=" * 70)
-    print(f"🎉 SUCCESS! YOUR WORKING SIGNATURE TYPE IS: {successful_sig}")
+    print(f"🎉 SUCCESS! VERIFIED WORKING CONFIGURATION FOUND!")
+    print(f"   Signature Type : {successful_sig}")
+    print(f"   API Key        : {creds.api_key}")
     print("=" * 70)
+
+    # Auto-update .env file
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        updated_keys = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("POLYMARKET_API_KEY="):
+                new_lines.append(f'POLYMARKET_API_KEY="{creds.api_key}"\n')
+                updated_keys.add("POLYMARKET_API_KEY")
+            elif stripped.startswith("POLYMARKET_SECRET="):
+                new_lines.append(f'POLYMARKET_SECRET="{creds.api_secret}"\n')
+                updated_keys.add("POLYMARKET_SECRET")
+            elif stripped.startswith("POLYMARKET_PASSPHRASE="):
+                new_lines.append(f'POLYMARKET_PASSPHRASE="{creds.api_passphrase}"\n')
+                updated_keys.add("POLYMARKET_PASSPHRASE")
+            elif stripped.startswith("POLYMARKET_SIGNATURE_TYPE="):
+                new_lines.append(f'POLYMARKET_SIGNATURE_TYPE="{successful_sig}"\n')
+                updated_keys.add("POLYMARKET_SIGNATURE_TYPE")
+            else:
+                new_lines.append(line)
+
+        if "POLYMARKET_API_KEY" not in updated_keys:
+            new_lines.append(f'POLYMARKET_API_KEY="{creds.api_key}"\n')
+        if "POLYMARKET_SECRET" not in updated_keys:
+            new_lines.append(f'POLYMARKET_SECRET="{creds.api_secret}"\n')
+        if "POLYMARKET_PASSPHRASE" not in updated_keys:
+            new_lines.append(f'POLYMARKET_PASSPHRASE="{creds.api_passphrase}"\n')
+        if "POLYMARKET_SIGNATURE_TYPE" not in updated_keys:
+            new_lines.append(f'POLYMARKET_SIGNATURE_TYPE="{successful_sig}"\n')
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+        print(f"✅ .env file successfully updated with matching credentials!")
+        print(f"   Saved at: {env_path}")
+        print("=" * 70)
