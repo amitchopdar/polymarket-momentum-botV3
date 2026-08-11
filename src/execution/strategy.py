@@ -1131,34 +1131,23 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 # Solution: For Deposit Wallet, you MUST provide pre-generated API creds from Polymarket UI.
                 creds = None
 
-                if api_key and secret and passphrase:
-                    # Priority 1: Use manually provided API credentials from .env
-                    creds = ApiCreds(
-                        api_key=api_key,
-                        api_secret=secret,
-                        api_passphrase=passphrase
-                    )
-                    logger.info(f"🔑 [L2 CREDS] Using manually provided API credentials from .env: {api_key[:8]}...")
-                else:
-                    # Priority 2: Auto-derive API credentials on this same ClobClient instance
-                    mode_label = "Deposit Wallet" if (sig_type == 3 and funder) else "EOA"
-                    logger.info(f"🔑 [L2 CREDS] Auto-deriving CLOB API Credentials ({mode_label} mode)...")
-                    if sig_type == 3 and funder:
-                        logger.warning(
-                            "⚠ Auto-deriving API credentials for Deposit Wallet. If orders fail with "
-                            "'signer address' errors, run: python scripts/derive_api_keys.py "
-                            "and add the output to your .env file."
+                # Auto-derive matching L2 API credentials directly on this ClobClient instance
+                mode_label = "Deposit Wallet" if (sig_type == 3 and funder) else "EOA"
+                logger.info(f"🔑 [L2 CREDS] Auto-deriving fresh CLOB API Credentials ({mode_label} mode)...")
+                try:
+                    derived_creds = self.clob_client.create_or_derive_api_key()
+                    if derived_creds:
+                        creds = ApiCreds(
+                            api_key=derived_creds.api_key,
+                            api_secret=derived_creds.api_secret,
+                            api_passphrase=derived_creds.api_passphrase
                         )
-                    derive_fn = getattr(self.clob_client, "create_or_derive_api_key", getattr(self.clob_client, "derive_api_key", None))
-                    if derive_fn:
-                        derived_creds = derive_fn()
-                        if derived_creds:
-                            creds = ApiCreds(
-                                api_key=derived_creds.api_key,
-                                api_secret=derived_creds.api_secret,
-                                api_passphrase=derived_creds.api_passphrase
-                            )
-                            logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
+                        logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
+                except Exception as derive_err:
+                    logger.warning(f"⚠ L2 credential auto-derivation notice: {derive_err}")
+                    if api_key and secret and passphrase:
+                        creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase)
+                        logger.info(f"🔑 [L2 CREDS] Falling back to .env credentials: {api_key[:8]}...")
 
                 if creds:
                     self.clob_client.set_api_creds(creds)
