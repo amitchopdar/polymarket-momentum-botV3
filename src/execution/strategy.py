@@ -1170,59 +1170,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         self.active_position = None
         return None
 
-        taker_fee_pct = getattr(config, "v2_taker_fee_pct", 0.02)
-        taker_fee_cost = round(exit_price * taker_fee_pct * new_sell_qty, 4)
-        pnl = round((exit_price - entry_price) * new_sell_qty - taker_fee_cost, 4)
-
-        pos["Sell_Quantity"] = new_sell_qty
-        pos["Sell_Order_Id"] = sell_order_id
-        pos["Exit_Timestamp"] = now_dt
-        pos["Exit_Price"] = exit_price
-        pos["Exit_Reason"] = reason
-        pos["Trade_Outcome"] = outcome
-        pos["Position_Status"] = "CLOSED"
-        pos["Pnl"] = pnl
-        pos["Updated_At"] = now_dt
-
-        if self.async_writer:
-            sql = """
-                UPDATE Positions SET
-                    Exit_Timestamp = ?,
-                    Exit_Price = ?,
-                    Exit_Reason = ?,
-                    Trade_Outcome = ?,
-                    Sell_Order_Id = ?,
-                    Sell_Quantity = ?,
-                    High_Water_Mark = ?,
-                    Stop_Loss_Price = ?,
-                    Position_Status = 'CLOSED',
-                    Pnl = ?,
-                    Updated_At = ?
-                WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'PARTIALLY_CLOSED'));
-            """
-            self.async_writer.enqueue_write(
-                sql,
-                (
-                    now_dt, exit_price, reason, outcome, sell_order_id,
-                    new_sell_qty, pos["High_Water_Mark"], pos["Stop_Loss_Price"],
-                    pnl, now_dt, pos.get("Buy_Order_Id"), candle_start
-                )
-            )
-
-        logger.info(
-            f"⌛ [V3 CANDLE CLOSED] Position Closed on 5m Boundary! Reason={reason} | Side={pos.get('Position_Side') or pos.get('Prediction_Side', 'UP')} | "
-            f"Candle={candle_start} | Exit_Price=${exit_price:.4f} | HWM=${pos['High_Water_Mark']:.4f} | SL=${pos['Stop_Loss_Price']:.4f} | PnL=${pnl:+.4f}"
-        )
-        if hasattr(self, "notifier") and self.notifier:
-            try:
-                self.notifier.notify_v2_trade_exit(candle_start, pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'), exit_price, outcome, pnl)
-            except Exception as e:
-                logger.warning(f"Failed to dispatch Telegram exit notification: {e}")
-
-        if pos.get("Token_Id") in self.tick_buffers:
-            self.tick_buffers[pos["Token_Id"]].clear()
-        self.active_position = None
-
         return pos
 
     def execute_entry(self, *args, **kwargs) -> Optional[Dict[str, Any]]:
