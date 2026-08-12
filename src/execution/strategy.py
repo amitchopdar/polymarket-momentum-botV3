@@ -899,6 +899,31 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     f"Transitioned {filled_qty:.4f} filled shares to OPEN position."
                 )
 
+                if not pos.get("Entry_Notified"):
+                    pos["Entry_Notified"] = True
+                    if hasattr(self, "notifier") and self.notifier:
+                        try:
+                            is_partial = filled_qty < (target_qty - 0.01)
+                            header = "📥 <b>V3 ORDER PARTIALLY FILLED</b>" if is_partial else "🚀 <b>V3 ORDER FILLED (100%)</b>"
+                            fill_p = pos.get("Average_Fill_Price", limit_buy_price)
+                            tp_p = pos.get("Take_Profit_Price", 0.99)
+                            sl_p = pos.get("Stop_Loss_Price", 0.01)
+                            spend_usd = round(fill_p * filled_qty, 2)
+                            qty_str = f"{filled_qty:.2f} / {target_qty:.2f} shares (Remaining Cancelled)" if is_partial else f"{filled_qty:.2f} shares"
+
+                            msg = (
+                                f"{header}\n"
+                                f"• <b>Candle:</b> <code>{candle_start}</code>\n"
+                                f"• <b>Prediction Side:</b> <code>{pos.get('Position_Side', 'UP')}</code>\n"
+                                f"• 📊 <b>Shares:</b> <code>{qty_str}</code> (Spend: ${spend_usd:.2f})\n"
+                                f"• 📥 <b>Avg Fill Price:</b> <code>${fill_p:.4f}</code>\n"
+                                f"• 🎯 <b>Take Profit:</b> <code>${tp_p:.4f}</code>\n"
+                                f"• 🛑 <b>Stop Loss:</b> <code>${sl_p:.4f}</code>"
+                            )
+                            self.notifier.send_message(msg)
+                        except Exception as e:
+                            logger.warning(f"Failed to dispatch Telegram entry notification: {e}")
+
     def _evaluate_closing_position(self, current_bid: Optional[float], current_ask: Optional[float]) -> None:
         """
         Evaluates active CLOSING position to confirm physical sell order fill on Polymarket exchange:
