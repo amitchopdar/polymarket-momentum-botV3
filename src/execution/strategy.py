@@ -1051,11 +1051,31 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         is_tp_trigger = current_bid >= tp_price
         is_sl_trigger = current_bid <= sl_price
+        is_expired_trigger = False
 
-        if is_tp_trigger or is_sl_trigger:
-            exit_reason = "TAKE_PROFIT" if is_tp_trigger else "STOP_LOSS"
-            trade_outcome = "WIN" if is_tp_trigger else ("LOSS" if sl_price < entry_price else "WIN")
-            exit_price = tp_price if is_tp_trigger else sl_price
+        order_placed_sec = pos.get("Order_Timestamp_Sec", now_ts)
+        elapsed_since_order = now_ts - order_placed_sec
+
+        # 2-Minute Expiration Safety Guard: If trade is > 7 minutes old (5m candle + 2m settlement)
+        if elapsed_since_order >= 420.0 and not is_tp_trigger and not is_sl_trigger:
+            is_expired_trigger = True
+            logger.info(f"⌛ [2-MIN MARKET EXPIRATION GUARD] Position elapsed {elapsed_since_order:.1f}s across candles. Settling final resolution...")
+
+        if is_tp_trigger or is_sl_trigger or is_expired_trigger:
+            if is_tp_trigger:
+                exit_reason = "TAKE_PROFIT"
+                trade_outcome = "WIN"
+                exit_price = tp_price
+            elif is_sl_trigger:
+                exit_reason = "STOP_LOSS"
+                trade_outcome = "LOSS" if sl_price < entry_price else "WIN"
+                exit_price = sl_price
+            else:
+                exit_reason = "MARKET_RESOLVED"
+                raw_p = current_bid or current_price or entry_price
+                exit_price = 1.00 if raw_p >= 0.50 else 0.00
+                trade_outcome = "WIN" if exit_price >= 0.50 else "LOSS"
+
             sell_order_id = pos.get("Tp_Order_Id") or f"V3_SELL_{int(now_ts*1000)}"
 
             # STEP A: If Stop-Loss triggered, cancel resting TP order on exchange first to unlock shares
