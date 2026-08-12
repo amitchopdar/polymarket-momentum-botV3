@@ -789,6 +789,23 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             pos["Stop_Loss_Price"] = stop_loss_price
             pos["High_Water_Mark"] = hwm
             pos["Position_Status"] = "OPEN"
+
+            if not pos.get("Entry_Notified"):
+                pos["Entry_Notified"] = True
+                if hasattr(self, "notifier") and self.notifier:
+                    try:
+                        self.notifier.notify_v2_trade_entry(
+                            candle_start,
+                            pos.get("Position_Side", "UP"),
+                            pos.get("Trigger_Odds_10s_Ago", fill_price),
+                            fill_price,
+                            take_profit_price,
+                            stop_loss_price,
+                            size_matched,
+                            round(fill_price * size_matched, 2)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to dispatch Telegram entry notification: {e}")
             # SUB-5s STOP-LOSS CHECK: If size_matched > 0 AND price <= stop_loss_price
             if size_matched > 0 and eff_price is not None and eff_price <= stop_loss_price:
                 logger.warning(
@@ -857,6 +874,19 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     f"⏰ [V3 MAKER ORDER TIMEOUT] Cancelled! Side={pos.get('Position_Side')} | Candle={candle_start} | "
                     f"Limit_Price=${limit_buy_price:.4f} unfilled after {elapsed_sec:.1f}s. Unlocking position guard."
                 )
+
+                if hasattr(self, "notifier") and self.notifier:
+                    try:
+                        self.notifier.send_message(
+                            f"⏰ <b>V3 LIMIT ORDER TIMED OUT</b>\n"
+                            f"• <b>Candle:</b> <code>{candle_start}</code>\n"
+                            f"• <b>Side:</b> <code>{pos.get('Position_Side', 'UP')}</code>\n"
+                            f"• <b>Limit Price:</b> <code>${limit_buy_price:.4f}</code>\n"
+                            f"• <b>Status:</b> <code>UNFILLED (Cancelled after {elapsed_sec:.1f}s)</code>"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to dispatch Telegram timeout notification: {e}")
+
                 if token_id in self.tick_buffers:
                     self.tick_buffers[token_id].clear()
                 self.active_position = None
