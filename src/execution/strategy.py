@@ -467,6 +467,11 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         max_odds_ceiling = getattr(config, "v2_max_entry_odds_ceiling", 0.92)
 
         if delta_odds >= momentum_thresh and min_odds_floor <= current_ask <= max_odds_ceiling:
+            sec_in_candle = int(now_sec) % 300
+            if sec_in_candle >= 285:
+                logger.info(f"⌛ [15s CANDLE ENTRY CUTOFF] Skipping new trade entry at minute {sec_in_candle//60}:{sec_in_candle%60:02d} near candle boundary.")
+                return None
+
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
             limit_buy_price = round(max(0.01, current_ask - maker_offset), 4)
@@ -890,12 +895,15 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 size_matched = round(float(order_info.get("size_matched") or order_info.get("sizeMatched") or 0.0), 4)
                 status = str(order_info.get("status", "")).upper()
 
-                # Extract exact real fill price from Polymarket CLOB exchange response
-                real_price = float(order_info.get("price") or 0.0)
+                # Priority 1: Extract exact real weighted average fill price (taking / making)
                 making = float(order_info.get("makingAmount") or order_info.get("making_amount") or 0.0)
                 taking = float(order_info.get("takingAmount") or order_info.get("taking_amount") or 0.0)
-                if real_price <= 0 and making > 0 and taking > 0:
+
+                real_price = 0.0
+                if making > 0 and taking > 0:
                     real_price = round(taking / making, 4)
+                elif order_info.get("price"):
+                    real_price = float(order_info["price"])
 
                 if real_price > 0:
                     pos["Exit_Price"] = real_price
@@ -980,7 +988,16 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
             if hasattr(self, "notifier") and self.notifier:
                 try:
-                    self.notifier.notify_v2_trade_exit(candle_start, pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'), exit_price, trade_outcome, pnl)
+                    entry_p = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price", 0.0)
+                    self.notifier.notify_v2_trade_exit(
+                        candle_start,
+                        pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'),
+                        exit_price,
+                        exit_reason,
+                        pnl,
+                        entry_price=entry_p,
+                        qty=exit_qty
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to dispatch Telegram exit notification: {e}")
 
@@ -1105,27 +1122,33 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             exit_qty = filled_qty
 
         new_sell_qty = round(prev_sell_qty + exit_qty, 4)
-        raw_exit = current_price or entry_price
-        candle_start = pos["Candle_Start"]
-        sell_order_id = f"V3_SELL_{int(now_ts*1000)}"
+        buy_order_id = pos.get("Buy_Order_Id")
+        if self.live_strategy and self.live_strategy.clob_client and buy_order_id and not str(buy_order_id).startswith("V3_"):
+            order_info = self.live_strategy.get_order_from_exchange(buy_order_id)
+            if order_info and isinstance(order_info, dict):
+                size_matched = round(float(order_info.get("size_matched") or order_info.get("sizeMatched") or 0.0), 4)
+                if size_matched > 0:
+                    pos["Filled_Quantity"] = size_matched
+                    if pos.get("Position_Status") in ("PENDING_FILL", "OPEN", "CLOSING"):
+                        if pos.get("Position_Status") == "PENDING_FILL":
+                            pos["Position_Status"] = "OPEN"
+                        logger.info(
+                            f"ℹ [CANDLE ROLLOVER RECONCILIATION] Position {buy_order_id} has {size_matched:.4f} filled shares. "
+                            f"Continuing live TP/SL tracking across candle boundary."
+                        )
+                        return pos
 
-        sl_price = pos["Stop_Loss_Price"]
-        tp_price = pos["Take_Profit_Price"]
-
-        # Priority 1: Check if Stop Loss was breached
-        if raw_exit <= sl_price:
-            exit_price = sl_price
-            reason = "STOP_LOSS"
-            outcome = "STOP_LOSS_HIT"
-        # Priority 2: Check if Take Profit was breached
-        elif raw_exit >= tp_price:
-            exit_price = tp_price
-            reason = "TAKE_PROFIT"
-            outcome = "TAKE_PROFIT_ACHIEVED"
-        else:
-            exit_price = raw_exit
-            reason = "CANDLE_EXPIRED"
-            outcome = "EXPIRED"
+        # If 0 shares filled at rollover, cancel buy order on exchange and unlock guard
+        if buy_order_id:
+            self.cancel_order_on_exchange(buy_order_id)
+        pos["Position_Status"] = "CANCELLED"
+        pos["Cancel_Reason"] = "EXPIRED_UNFILLED"
+        pos["Updated_At"] = now_dt
+        if self.async_writer and buy_order_id:
+            sql = "UPDATE Positions SET Position_Status = 'CANCELLED', Cancel_Reason = 'EXPIRED_UNFILLED', Updated_At = ? WHERE Buy_Order_Id = ?;"
+            self.async_writer.enqueue_write(sql, (now_dt, buy_order_id))
+        self.active_position = None
+        return None
 
         taker_fee_pct = getattr(config, "v2_taker_fee_pct", 0.02)
         taker_fee_cost = round(exit_price * taker_fee_pct * new_sell_qty, 4)

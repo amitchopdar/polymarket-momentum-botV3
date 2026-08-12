@@ -201,24 +201,44 @@ class TelegramNotifier:
         )
         self.send_message(text)
 
-    def notify_v2_trade_exit(self, candle_start: str, side: str, exit_price: float, reason: str, pnl: float) -> None:
+    def notify_v2_trade_exit(
+        self,
+        candle_start: str,
+        side: str,
+        exit_price: float,
+        reason: str,
+        pnl: float,
+        entry_price: Optional[float] = None,
+        qty: Optional[float] = None
+    ) -> None:
         ist_str = format_ist(candle_start)
-        if reason == "TAKE_PROFIT_ACHIEVED":
-            header = "🎯 <b>V2 TAKE PROFIT HIT</b>"
-        elif reason == "STOP_LOSS_HIT":
-            header = "🛑 <b>V2 STOP LOSS TRIGGERED</b>"
+        reason_upper = str(reason).upper()
+        if "TAKE_PROFIT" in reason_upper:
+            header = "🎯 <b>V3 TAKE PROFIT HIT</b>"
+        elif "STOP_LOSS" in reason_upper:
+            header = "🛑 <b>V3 STOP LOSS TRIGGERED</b>"
         else:
-            header = "⌛ <b>V2 CANDLE EXPIRED</b>"
-        
+            header = "⌛ <b>V3 CANDLE EXPIRED</b>"
+
         emoji = "📈" if pnl >= 0 else "📉"
-        text = (
-            f"{header}\n"
-            f"• <b>Candle:</b> <code>{ist_str}</code>\n"
-            f"• <b>Side:</b> <code>{side}</code>\n"
-            f"• <b>Exit Price:</b> <code>${exit_price:.4f}</code>\n"
-            f"• <b>Exit Reason:</b> <code>{reason}</code>\n"
-            f"• {emoji} <b>Net PnL:</b> <code>${pnl:+.4f}</code>"
-        )
+        outcome_str = "WIN ✅" if pnl >= 0 else "LOSS ❌"
+
+        lines = [
+            f"{header}",
+            f"• <b>Candle:</b> <code>{ist_str}</code>",
+            f"• <b>Prediction Side:</b> <code>{side}</code>",
+        ]
+        if entry_price and entry_price > 0:
+            lines.append(f"• 📥 <b>Entry Price:</b> <code>${entry_price:.4f}</code>")
+        lines.append(f"• 📤 <b>Exit Price:</b> <code>${exit_price:.4f}</code>")
+        if qty and qty > 0:
+            spend_usd = (entry_price or exit_price) * qty
+            return_usd = exit_price * qty
+            lines.append(f"• 📊 <b>Shares:</b> <code>{qty:.2f}</code> (Spend: ${spend_usd:.2f} | Return: ${return_usd:.2f})")
+        lines.append(f"• <b>Exit Reason:</b> <code>{reason}</code>")
+        lines.append(f"• {emoji} <b>Net PnL:</b> <code>${pnl:+.4f} ({outcome_str})</code>")
+
+        text = "\n".join(lines)
         self.send_message(text)
 
     def notify_model_retrained(self, promoted: bool, trained_at_ist: str, win_rate: float, mc_dd: float = 0.0, ruin: float = 0.0, reason: str = "") -> None:
