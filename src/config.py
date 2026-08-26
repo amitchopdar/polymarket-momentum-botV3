@@ -54,7 +54,7 @@ USER_V2_MAX_POSITION_SIZE_USD = 4.0        # Max position size per trade ($4.00 
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
-USER_V3_MAKER_OFFSET_CENTS = 0.02          # 2 cents below best ask for Maker status (0.01 or 0.02)
+USER_V3_MAKER_OFFSET_CENTS = 0.00          # 2 cents below best ask for Maker status (0.01 or 0.02)
 USER_V3_MAKER_ORDER_TIMEOUT_SEC = 5.0      # 5 seconds order cancellation timeout
 # ==============================================================================
 
