@@ -899,10 +899,19 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                         except Exception:
                             pass
 
-                # If check_info shows filled shares on exchange:
-                if check_matched > 0 or (check_info and str(check_info.get("status", "")).upper() in ("MATCHED", "FILLED")):
+                is_bought = False
+                if check_info and isinstance(check_info, dict):
+                    status_upper = str(check_info.get("status", "")).upper()
+                    if check_matched > 0 or making > 0 or taking > 0 or status_upper in ("MATCHED", "FILLED", "CLOSED"):
+                        is_bought = True
+
+                # If check_info shows filled/matched shares on exchange:
+                if is_bought:
                     final_fill_price = check_price if (check_price is not None and check_price > 0) else limit_buy_price
-                    final_fill_qty = check_matched if check_matched > 0 else target_qty
+                    calc_qty = check_matched
+                    if calc_qty <= 0 and taking > 0:
+                        calc_qty = round(taking / 1000000.0, 4) if taking > 1000 else round(taking, 4)
+                    final_fill_qty = calc_qty if calc_qty > 0 else target_qty
 
                     high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
                     high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
