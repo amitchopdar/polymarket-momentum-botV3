@@ -233,4 +233,55 @@ def test_v3_buy_fill_price_extraction_and_zero_balance_liquidation(memory_db):
     # Position must be successfully marked CLOSED and cleared!
     assert strat.dry_strategy.active_position is None
 
+def test_v3_timeout_fill_reconciliation(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-08-05 00:30:00"
+    slug = "btc-updown-5m-1785831800"
+    token_id = "TOK_TIMEOUT_RECON"
+
+    # Setup PENDING_FILL position whose 5.0s timeout is about to expire
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_id,
+        "Position_Side": "DOWN",
+        "Position_Status": "PENDING_FILL",
+        "Target_Buy_Price": 0.75,
+        "Target_Quantity": 5.33,
+        "Filled_Quantity": 0.0,
+        "Buy_Order_Id": "0x8740abd04381619559866b115f82c4a56394f93aa039ee7fab94660a07cc5ec5",
+        "Order_Timestamp_Sec": now_sec - 5.2, # 5.2s elapsed!
+    }
+
+    # Exchange reports cancel notice says "already matched" and get_order confirms FILLED
+    mock_clob.cancel_orders.return_value = {
+        "canceled": [],
+        "not_canceled": {"0x8740abd04381619559866b115f82c4a56394f93aa039ee7fab94660a07cc5ec5": "already canceled or matched"}
+    }
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "5.33",
+        "makingAmount": "3.9975",
+        "takingAmount": "5.33",
+        "price": "0.7500"
+    }
+
+    # Tick arrives at timeout boundary
+    strat.process_tick(candle_start, slug, "DOWN", token_id, 0.74, 0.75)
+
+    # Position MUST NOT be CANCELLED/abandoned; it MUST be transitioned to OPEN for live tracking!
+    pos = strat.dry_strategy.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "OPEN"
+    assert pos["Filled_Quantity"] == 5.33
+    assert pos["Average_Fill_Price"] == 0.7500
+
+
 

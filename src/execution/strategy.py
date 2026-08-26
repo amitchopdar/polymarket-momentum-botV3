@@ -873,6 +873,75 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             if filled_qty <= 0.0:
                 if buy_order_id:
                     self.cancel_order_on_exchange(buy_order_id)
+
+                # Re-query exchange order info to confirm if the order actually filled before/during cancellation
+                check_info = None
+                if self.live_strategy and self.live_strategy.clob_client and buy_order_id and not str(buy_order_id).startswith("V3_"):
+                    check_info = self.live_strategy.get_order_from_exchange(buy_order_id)
+
+                check_matched = 0.0
+                check_price = None
+                if check_info and isinstance(check_info, dict):
+                    check_matched = round(float(check_info.get("sizeMatched") or check_info.get("size_matched") or 0.0), 4)
+                    making = float(check_info.get("makingAmount") or check_info.get("making_amount") or 0.0)
+                    taking = float(check_info.get("takingAmount") or check_info.get("taking_amount") or 0.0)
+                    if making > 0 and taking > 0:
+                        r1, r2 = making / taking, taking / making
+                        if 0.01 <= r1 <= 1.00:
+                            check_price = round(r1, 4)
+                        elif 0.01 <= r2 <= 1.00:
+                            check_price = round(r2, 4)
+                    elif check_info.get("price"):
+                        try:
+                            p_v = float(check_info["price"])
+                            if 0.01 <= p_v <= 1.00:
+                                check_price = p_v
+                        except Exception:
+                            pass
+
+                # If check_info shows filled shares on exchange:
+                if check_matched > 0 or (check_info and str(check_info.get("status", "")).upper() in ("MATCHED", "FILLED")):
+                    final_fill_price = check_price if (check_price is not None and check_price > 0) else limit_buy_price
+                    final_fill_qty = check_matched if check_matched > 0 else target_qty
+
+                    high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
+                    high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
+                    tp_cents = getattr(config, "v2_take_profit_cents", 0.05)
+                    trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
+
+                    hwm = max(final_fill_price, peak_price)
+                    stop_loss_price = round(max(0.01, hwm - trailing_dist), 4)
+                    raw_tp = high_odds_tp if final_fill_price >= high_odds_cutoff else round(min(high_odds_tp, final_fill_price + tp_cents), 4)
+                    take_profit_price = round(min(0.9900, raw_tp), 4)
+
+                    pos["Average_Fill_Price"] = final_fill_price
+                    pos["Filled_Quantity"] = final_fill_qty
+                    pos["Take_Profit_Price"] = take_profit_price
+                    pos["Stop_Loss_Price"] = stop_loss_price
+                    pos["High_Water_Mark"] = hwm
+                    pos["Position_Status"] = "OPEN"
+                    logger.info(
+                        f"🎯 [V3 TIMEOUT RECONCILIATION] Order {buy_order_id} filled {final_fill_qty:.4f} shares at ${final_fill_price:.4f} on exchange! "
+                        f"Transitioning to OPEN position for live TP/SL tracking."
+                    )
+                    if not pos.get("Entry_Notified"):
+                        pos["Entry_Notified"] = True
+                        if hasattr(self, "notifier") and self.notifier:
+                            try:
+                                self.notifier.notify_v2_trade_entry(
+                                    candle_start,
+                                    pos.get("Position_Side", "UP"),
+                                    pos.get("Trigger_Odds_10s_Ago", final_fill_price),
+                                    final_fill_price,
+                                    take_profit_price,
+                                    stop_loss_price,
+                                    final_fill_qty,
+                                    round(final_fill_price * final_fill_qty, 2)
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to dispatch Telegram entry notification: {e}")
+                    return
+
                 pos["Position_Status"] = "CANCELLED"
                 pos["Cancel_Reason"] = f"TIMEOUT_{timeout_sec:.1f}S"
                 pos["Updated_At"] = now_dt
