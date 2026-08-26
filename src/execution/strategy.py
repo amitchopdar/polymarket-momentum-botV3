@@ -639,21 +639,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             f"TP=${take_profit_price:.4f} | SL=${stop_loss_price:.4f} | Qty={target_qty}"
         )
 
-        if hasattr(self, "notifier") and self.notifier:
-            try:
-                self.notifier.notify_v2_trade_entry(
-                    candle_start=candle_start,
-                    side=side,
-                    signal_price=entry_odds,
-                    fill_price=fill_price,
-                    tp_price=take_profit_price,
-                    sl_price=stop_loss_price,
-                    qty=target_qty,
-                    position_usd=position_usd
-                )
-            except Exception as e:
-                logger.warning(f"Failed to dispatch Telegram entry notification: {e}")
-
         return pos
 
     def execute_entry_v3(
@@ -900,18 +885,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     f"⏰ [V3 MAKER ORDER TIMEOUT] Cancelled! Side={pos.get('Position_Side')} | Candle={candle_start} | "
                     f"Limit_Price=${limit_buy_price:.4f} unfilled after {elapsed_sec:.1f}s. Unlocking position guard."
                 )
-
-                if hasattr(self, "notifier") and self.notifier:
-                    try:
-                        self.notifier.send_message(
-                            f"⏰ <b>V3 LIMIT ORDER TIMED OUT</b>\n"
-                            f"• <b>Candle:</b> <code>{candle_start}</code>\n"
-                            f"• <b>Side:</b> <code>{pos.get('Position_Side', 'UP')}</code>\n"
-                            f"• <b>Limit Price:</b> <code>${limit_buy_price:.4f}</code>\n"
-                            f"• <b>Status:</b> <code>UNFILLED (Cancelled after {elapsed_sec:.1f}s)</code>"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to dispatch Telegram timeout notification: {e}")
 
                 if token_id in self.tick_buffers:
                     self.tick_buffers[token_id].clear()
@@ -1481,22 +1454,6 @@ class LiveExecutionStrategy(IExecutionStrategy):
             }
 
             logger.info(f"🎯 [LIVE CLOB ORDER PLACED 200 OK] OrderID={order_id} | Side={side} | Price=${limit_buy_price:.4f} | Qty={target_qty}")
-
-            # Dispatch Telegram entry notification directly for Live CLOB Order
-            if hasattr(self, "notifier") and self.notifier:
-                try:
-                    self.notifier.notify_v2_trade_entry(
-                        candle_start=candle_start,
-                        side=side,
-                        signal_price=entry_odds,
-                        fill_price=limit_buy_price,
-                        tp_price=pos["Take_Profit_Price"],
-                        sl_price=pos["Stop_Loss_Price"],
-                        qty=target_qty,
-                        position_usd=position_usd
-                    )
-                except Exception as e:
-                    logger.warning(f"Notifier error: {e}")
 
             return pos
         except Exception as e:
