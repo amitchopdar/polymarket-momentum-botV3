@@ -467,10 +467,15 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         max_odds_ceiling = getattr(config, "v2_max_entry_odds_ceiling", 0.92)
 
         if delta_odds >= momentum_thresh and min_odds_floor <= current_ask <= max_odds_ceiling:
-            sec_in_candle = int(now_sec) % 300
-            if sec_in_candle >= 285:
-                logger.info(f"⌛ [15s CANDLE ENTRY CUTOFF] Skipping new trade entry at minute {sec_in_candle//60}:{sec_in_candle%60:02d} near candle boundary.")
-                return None
+            try:
+                dt_obj = datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                candle_start_ts = dt_obj.timestamp()
+                sec_in_candle = int(now_sec - candle_start_ts)
+                if 285 <= sec_in_candle < 300:
+                    logger.info(f"⌛ [15s CANDLE ENTRY CUTOFF] Skipping new trade entry at {sec_in_candle}s into candle.")
+                    return None
+            except Exception:
+                pass
 
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
@@ -818,13 +823,16 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     self.cancel_order_on_exchange(pos["Tp_Order_Id"])
 
                 slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
-                limit_sell_price = round(max(0.01, stop_loss_price - slippage), 4)
+                effective_bid = current_bid if (current_bid is not None and current_bid > 0) else eff_price
+                limit_sell_price = round(max(0.01, min(stop_loss_price, effective_bid or stop_loss_price) - slippage), 4)
 
-                sell_order_id = f"V3_SL_{int(now_sec*1000)}"
+                sell_order_id = None
                 if self.live_strategy and self.live_strategy.clob_client and token_id:
                     sl_resp = self.live_strategy.post_limit_sell(token_id, limit_sell_price, size_matched)
                     if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
                         sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
+                else:
+                    sell_order_id = f"V3_SL_{int(now_sec*1000)}"
 
                 pos["Position_Status"] = "CLOSING"
                 pos["Closing_Timestamp_Sec"] = now_sec
@@ -944,65 +952,86 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         candle_start = pos.get("Candle_Start", "")
 
         is_filled = False
-        if self.live_strategy and self.live_strategy.clob_client and sell_order_id and not str(sell_order_id).startswith("V3_"):
-            order_info = self.live_strategy.get_order_from_exchange(sell_order_id)
-            if order_info and isinstance(order_info, dict):
-                size_matched = round(float(order_info.get("size_matched") or order_info.get("sizeMatched") or 0.0), 4)
-                status = str(order_info.get("status", "")).upper()
+        slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
 
-                # Priority 1: Extract exact real weighted average fill price (taking / making)
-                making = float(order_info.get("makingAmount") or order_info.get("making_amount") or 0.0)
-                taking = float(order_info.get("takingAmount") or order_info.get("taking_amount") or 0.0)
+        if self.live_strategy and self.live_strategy.clob_client:
+            # LIVE TRADING MODE
+            if sell_order_id and not str(sell_order_id).startswith("V3_"):
+                # Case A: Real exchange sell order exists -> Query exchange for fill status
+                order_info = self.live_strategy.get_order_from_exchange(sell_order_id)
+                if order_info and isinstance(order_info, dict):
+                    size_matched = round(float(order_info.get("size_matched") or order_info.get("sizeMatched") or 0.0), 4)
+                    status = str(order_info.get("status", "")).upper()
 
-                real_price = 0.0
-                if making > 0 and taking > 0:
-                    real_price = round(taking / making, 4)
-                elif order_info.get("price"):
-                    real_price = float(order_info["price"])
+                    # Priority 1: Extract exact real weighted average fill price (taking / making)
+                    making = float(order_info.get("makingAmount") or order_info.get("making_amount") or 0.0)
+                    taking = float(order_info.get("takingAmount") or order_info.get("taking_amount") or 0.0)
 
-                if real_price > 0:
-                    pos["Exit_Price"] = real_price
-                    entry_p = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price", 0.0)
-                    calc_qty = size_matched if size_matched > 0 else exit_qty
-                    calc_pnl = round((real_price - entry_p) * calc_qty, 4)
-                    pos["Pnl"] = calc_pnl
-                    pos["Trade_Outcome"] = "WIN" if real_price >= entry_p else "LOSS"
+                    real_price = 0.0
+                    if making > 0 and taking > 0:
+                        real_price = round(taking / making, 4)
+                    elif order_info.get("price"):
+                        real_price = float(order_info["price"])
 
-                if status in ("MATCHED", "FILLED") or size_matched >= (exit_qty - 0.01):
-                    is_filled = True
-        else:
-            is_filled = True  # Simulation / dry-run fallback
+                    if real_price > 0:
+                        pos["Exit_Price"] = real_price
+                        entry_p = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price", 0.0)
+                        calc_qty = size_matched if size_matched > 0 else exit_qty
+                        calc_pnl = round((real_price - entry_p) * calc_qty, 4)
+                        pos["Pnl"] = calc_pnl
+                        pos["Trade_Outcome"] = "WIN" if real_price >= entry_p else "LOSS"
 
-        if not is_filled and self.live_strategy and self.live_strategy.clob_client and sell_order_id and not str(sell_order_id).startswith("V3_"):
-            cur_limit_price = pos.get("Sell_Limit_Price") or pos.get("Exit_Price", 0.0)
-            slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
-            should_rechase = False
-
-            if current_bid is not None and current_bid <= (cur_limit_price - 0.01):
-                should_rechase = True
-            elif elapsed_sec >= 3.0:
-                should_rechase = True
-
-            if should_rechase:
-                logger.info(f"🔄 [DYNAMIC RE-CHASE TRIGGERED] Market price dropped (Bid: ${current_bid}) below Limit Sell ${cur_limit_price:.4f}. Re-pricing SL order...")
-                self.cancel_order_on_exchange(sell_order_id)
-                check_info = self.live_strategy.get_order_from_exchange(sell_order_id)
-                if check_info and isinstance(check_info, dict):
-                    c_status = str(check_info.get("status", "")).upper()
-                    c_matched = round(float(check_info.get("size_matched") or check_info.get("sizeMatched") or 0.0), 4)
-                    if c_status in ("MATCHED", "FILLED") or c_matched >= (exit_qty - 0.01):
+                    if status in ("MATCHED", "FILLED") or size_matched >= (exit_qty - 0.01):
                         is_filled = True
 
-                if not is_filled and pos.get("Token_Id"):
-                    remaining_qty = exit_qty
-                    new_limit_price = round(max(0.01, (current_bid or cur_limit_price) - slippage), 4)
-                    new_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], new_limit_price, remaining_qty)
+                # Dynamic re-chasing if price dropped below resting limit or resting > 3s
+                if not is_filled:
+                    cur_limit_price = pos.get("Sell_Limit_Price") or pos.get("Exit_Price", 0.0)
+                    should_rechase = False
+
+                    if current_bid is not None and current_bid <= (cur_limit_price - 0.01):
+                        should_rechase = True
+                    elif elapsed_sec >= 3.0:
+                        should_rechase = True
+
+                    if should_rechase:
+                        logger.info(f"🔄 [DYNAMIC RE-CHASE TRIGGERED] Market price dropped (Bid: ${current_bid}) below Limit Sell ${cur_limit_price:.4f}. Re-pricing SL order...")
+                        self.cancel_order_on_exchange(sell_order_id)
+                        check_info = self.live_strategy.get_order_from_exchange(sell_order_id)
+                        if check_info and isinstance(check_info, dict):
+                            c_status = str(check_info.get("status", "")).upper()
+                            c_matched = round(float(check_info.get("size_matched") or check_info.get("sizeMatched") or 0.0), 4)
+                            if c_status in ("MATCHED", "FILLED") or c_matched >= (exit_qty - 0.01):
+                                is_filled = True
+
+                        if not is_filled and pos.get("Token_Id"):
+                            remaining_qty = exit_qty
+                            new_limit_price = round(max(0.01, (current_bid or cur_limit_price) - slippage), 4)
+                            new_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], new_limit_price, remaining_qty)
+                            if new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
+                                new_id = new_resp.get("orderID") or new_resp.get("orderId")
+                                pos["Sell_Order_Id"] = new_id
+                                pos["Sell_Limit_Price"] = new_limit_price
+                                pos["Closing_Timestamp_Sec"] = now_sec
+                                logger.info(f"🎯 [RE-CHASE SL ORDER DISPATCHED] OrderID={new_id} Price=${new_limit_price:.4f} Qty={remaining_qty:.4f}")
+                            else:
+                                pos["Sell_Order_Id"] = None
+            else:
+                # Case B: No real sell order ID (initial placement failed or balance sync delayed) -> Retry posting on exchange!
+                if pos.get("Token_Id"):
+                    cur_limit_price = pos.get("Sell_Limit_Price") or pos.get("Exit_Price") or pos.get("Stop_Loss_Price", 0.01)
+                    target_bid = current_bid if (current_bid is not None and current_bid > 0) else cur_limit_price
+                    new_limit_price = round(max(0.01, min(cur_limit_price, target_bid) - slippage), 4)
+                    new_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], new_limit_price, exit_qty)
                     if new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
                         new_id = new_resp.get("orderID") or new_resp.get("orderId")
                         pos["Sell_Order_Id"] = new_id
                         pos["Sell_Limit_Price"] = new_limit_price
                         pos["Closing_Timestamp_Sec"] = now_sec
-                        logger.info(f"🎯 [RE-CHASE SL ORDER DISPATCHED] OrderID={new_id} Price=${new_limit_price:.4f} Qty={remaining_qty:.4f}")
+                        logger.info(f"🎯 [SL LIMIT SELL PLACED ON RETRY] OrderID={new_id} Price=${new_limit_price:.4f} Qty={exit_qty:.4f}")
+        else:
+            # DRY-RUN / SIMULATION MODE FALLBACK
+            is_filled = True
 
         if is_filled:
             pos["Position_Status"] = "CLOSED"
@@ -1131,7 +1160,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 exit_price = 1.00 if raw_p >= 0.50 else 0.00
                 trade_outcome = "WIN" if exit_price >= 0.50 else "LOSS"
 
-            sell_order_id = pos.get("Tp_Order_Id") or f"V3_SELL_{int(now_ts*1000)}"
+            sell_order_id = pos.get("Tp_Order_Id") if is_tp_trigger else None
+            if not self.live_strategy or not self.live_strategy.clob_client:
+                sell_order_id = pos.get("Tp_Order_Id") or f"V3_SELL_{int(now_ts*1000)}"
 
             # STEP A: If Stop-Loss triggered, cancel resting TP order on exchange first to unlock shares
             if is_sl_trigger and pos.get("Tp_Order_Id"):
@@ -1146,13 +1177,18 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             # STEP B: If Stop-Loss triggered, dispatch Limit Sell SL order (SL_Price - Slippage) on exchange
             if is_sl_trigger:
                 slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
-                limit_sell_price = round(max(0.01, sl_price - slippage), 4)
+                effective_bid = current_bid if (current_bid is not None and current_bid > 0) else sl_price
+                limit_sell_price = round(max(0.01, min(sl_price, effective_bid) - slippage), 4)
                 exit_price = limit_sell_price
 
                 if self.live_strategy and self.live_strategy.clob_client and pos.get("Token_Id"):
                     sl_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], limit_sell_price, exit_qty)
                     if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
                         sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
+                    else:
+                        sell_order_id = None
+                else:
+                    sell_order_id = f"V3_SL_{int(now_ts*1000)}"
 
                 pos["Sell_Limit_Price"] = limit_sell_price
 

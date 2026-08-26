@@ -98,3 +98,73 @@ def test_v3_single_active_order_guard(memory_db):
 
     # Single order guard must block the second order!
     assert pos_dn is None
+
+def test_v3_live_sl_retry_and_no_synthetic_closure(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-08-05 00:20:00"
+    slug = "btc-updown-5m-1785831200"
+    token_id = "TOK_LIVE_SL"
+
+    # 1. Setup OPEN position on the internal strategy
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_id,
+        "Position_Side": "DOWN",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.65,
+        "Average_Fill_Price": 0.65,
+        "Target_Quantity": 6.15,
+        "Filled_Quantity": 6.15,
+        "Take_Profit_Price": 0.74,
+        "Stop_Loss_Price": 0.59,
+        "High_Water_Mark": 0.65,
+        "Tp_Order_Id": None,
+        "Tp_Qty": 0.0,
+        "Order_Timestamp_Sec": now_sec,
+    }
+
+    # Simulate post_limit_sell failing on initial SL trigger (e.g. 400 Bad Request balance: 0)
+    mock_clob.post_order.side_effect = Exception("balance: 0")
+
+    # 2. Market price crashes to $0.55 <= SL $0.59 -> SL Trigger fires
+    strat.process_tick(candle_start, slug, "DOWN", token_id, 0.55, 0.56)
+
+    # Position MUST be in CLOSING state and Sell_Order_Id must be None (NEVER falsely marked CLOSED!)
+    assert strat.dry_strategy.active_position is not None
+    assert strat.dry_strategy.active_position["Position_Status"] == "CLOSING"
+    assert strat.dry_strategy.active_position["Sell_Order_Id"] is None
+
+    # 3. Simulate next tick: Polygon balance settles, post_order now returns 200 OK with orderID
+    mock_clob.post_order.side_effect = None
+    mock_clob.create_order.return_value = {"signed": True}
+    mock_clob.post_order.return_value = {"orderID": "0xREAL_EXCHANGE_SL_ORDER_123"}
+    mock_clob.get_order.return_value = {"status": "OPEN", "size_matched": "0.0", "price": "0.53"}
+
+    strat.process_tick(candle_start, slug, "DOWN", token_id, 0.55, 0.56)
+
+    # Order ID is updated to the real exchange order ID and remains in CLOSING
+    assert strat.dry_strategy.active_position is not None
+    assert strat.dry_strategy.active_position["Position_Status"] == "CLOSING"
+    assert strat.dry_strategy.active_position["Sell_Order_Id"] == "0xREAL_EXCHANGE_SL_ORDER_123"
+
+    # 4. Exchange returns FILLED on subsequent tick with weighted average taking/making
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "6.15",
+        "makingAmount": "6.15",
+        "takingAmount": "3.2595", # Fill price = 3.2595 / 6.15 = 0.5300
+    }
+
+    strat.process_tick(candle_start, slug, "DOWN", token_id, 0.55, 0.56)
+
+    # Position is now officially CLOSED on exchange confirmation!
+    assert strat.dry_strategy.active_position is None
+
