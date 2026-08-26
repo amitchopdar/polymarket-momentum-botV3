@@ -168,3 +168,69 @@ def test_v3_live_sl_retry_and_no_synthetic_closure(memory_db):
     # Position is now officially CLOSED on exchange confirmation!
     assert strat.dry_strategy.active_position is None
 
+def test_v3_buy_fill_price_extraction_and_zero_balance_liquidation(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-08-05 00:25:00"
+    slug = "btc-updown-5m-1785831500"
+    token_id = "TOK_BUY_FILL"
+
+    # 1. Setup PENDING_FILL position (Limit buy cap was $0.68)
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_id,
+        "Position_Side": "UP",
+        "Position_Status": "PENDING_FILL",
+        "Target_Buy_Price": 0.68,
+        "Target_Quantity": 5.88,
+        "Filled_Quantity": 0.0,
+        "Buy_Order_Id": "0xBUY_ORDER_TEST",
+        "Order_Timestamp_Sec": now_sec,
+    }
+
+    # Exchange reports order filled with price improvement at $0.5800!
+    # makingAmount = 3.4104 USDC, takingAmount = 5.88 shares -> 3.4104 / 5.88 = 0.5800
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "5.88",
+        "makingAmount": "3.4104",
+        "takingAmount": "5.88",
+        "price": "0.5800"
+    }
+
+    # Tick arrives at $0.57 (Below limit buy $0.68, but above new SL $0.48)
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.57, 0.58)
+
+    # Position must be OPEN with Average_Fill_Price = 0.5800 and Stop_Loss_Price = 0.4800 (NOT 0.5800!)
+    pos = strat.dry_strategy.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "OPEN"
+    assert pos["Average_Fill_Price"] == 0.5800
+    assert pos["Stop_Loss_Price"] == 0.4800
+    assert pos["Take_Profit_Price"] == round(0.58 + getattr(config, "v2_take_profit_cents", 0.20), 4)
+
+    # 2. Re-Chase / Zero Balance reconciliation test:
+    # Transition to CLOSING with a dispatched sell order
+    pos["Position_Status"] = "CLOSING"
+    pos["Sell_Order_Id"] = "0xSELL_RESTING"
+    pos["Sell_Order_Dispatched"] = True
+    pos["Closing_Timestamp_Sec"] = now_sec - 3.5
+
+    # Simulate re-chase cancel: Polymarket returns ZERO_BALANCE error because order already matched on book
+    mock_clob.cancel_orders.return_value = {"canceled": [], "not_canceled": {"0xSELL_RESTING": "already matched"}}
+    mock_clob.get_order.return_value = {"status": "MATCHED", "size_matched": "5.88", "makingAmount": "5.88", "takingAmount": "2.8812"}
+    mock_clob.post_order.side_effect = Exception("balance is not enough -> balance: 0")
+
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.49, 0.50)
+
+    # Position must be successfully marked CLOSED and cleared!
+    assert strat.dry_strategy.active_position is None
+
+

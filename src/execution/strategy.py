@@ -765,19 +765,37 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         eff_price = current_bid if (current_bid is not None and current_bid > 0) else current_ask
         peak_price = max(current_bid or 0.0, current_ask or 0.0)
 
-        # 1. FETCH EXACT FILLED QUANTITY DIRECTLY FROM POLYMARKET EXCHANGE
+        # 1. FETCH EXACT FILLED QUANTITY & REAL FILL PRICE DIRECTLY FROM POLYMARKET EXCHANGE
         size_matched = 0.0
+        real_fill_price = None
         if self.live_strategy and self.live_strategy.clob_client and buy_order_id:
             order_info = self.live_strategy.get_order_from_exchange(buy_order_id)
             if order_info and isinstance(order_info, dict):
                 size_matched = round(float(order_info.get("sizeMatched") or order_info.get("size_matched") or 0.0), 4)
+
+                making = float(order_info.get("makingAmount") or order_info.get("making_amount") or 0.0)
+                taking = float(order_info.get("takingAmount") or order_info.get("taking_amount") or 0.0)
+                if making > 0 and taking > 0:
+                    ratio1 = making / taking
+                    ratio2 = taking / making
+                    if 0.01 <= ratio1 <= 1.00:
+                        real_fill_price = round(ratio1, 4)
+                    elif 0.01 <= ratio2 <= 1.00:
+                        real_fill_price = round(ratio2, 4)
+                elif order_info.get("price"):
+                    try:
+                        p_val = float(order_info["price"])
+                        if 0.01 <= p_val <= 1.00:
+                            real_fill_price = p_val
+                    except Exception:
+                        pass
         else:
             # Simulation fallback: Market price dips <= limit_buy_price (unless timed out)
             if elapsed_sec < timeout_sec and eff_price is not None and eff_price <= limit_buy_price:
                 size_matched = target_qty
 
         if size_matched > 0:
-            fill_price = limit_buy_price
+            fill_price = real_fill_price if (real_fill_price is not None and real_fill_price > 0) else limit_buy_price
             high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
             high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
             tp_cents = getattr(config, "v2_take_profit_cents", 0.05)
@@ -981,8 +999,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                         pos["Pnl"] = calc_pnl
                         pos["Trade_Outcome"] = "WIN" if real_price >= entry_p else "LOSS"
 
-                    if status in ("MATCHED", "FILLED") or size_matched >= (exit_qty - 0.01):
+                    if status in ("MATCHED", "FILLED", "CLOSED") or size_matched >= (exit_qty - 0.01):
                         is_filled = True
+                        pos["Sell_Order_Dispatched"] = True
 
                 # Dynamic re-chasing if price dropped below resting limit or resting > 3s
                 if not is_filled:
@@ -1001,15 +1020,20 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                         if check_info and isinstance(check_info, dict):
                             c_status = str(check_info.get("status", "")).upper()
                             c_matched = round(float(check_info.get("size_matched") or check_info.get("sizeMatched") or 0.0), 4)
-                            if c_status in ("MATCHED", "FILLED") or c_matched >= (exit_qty - 0.01):
+                            if c_status in ("MATCHED", "FILLED", "CLOSED") or c_matched >= (exit_qty - 0.01):
                                 is_filled = True
+                                pos["Sell_Order_Dispatched"] = True
 
                         if not is_filled and pos.get("Token_Id"):
                             remaining_qty = exit_qty
                             new_limit_price = round(max(0.01, (current_bid or cur_limit_price) - slippage), 4)
                             new_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], new_limit_price, remaining_qty)
-                            if new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
+                            if new_resp and isinstance(new_resp, dict) and new_resp.get("error") == "ZERO_BALANCE":
+                                logger.info("🏁 [POSITION 100% LIQUIDATED] Token balance is 0 on exchange. Trade confirmed closed.")
+                                is_filled = True
+                            elif new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
                                 new_id = new_resp.get("orderID") or new_resp.get("orderId")
+                                pos["Sell_Order_Dispatched"] = True
                                 pos["Sell_Order_Id"] = new_id
                                 pos["Sell_Limit_Price"] = new_limit_price
                                 pos["Closing_Timestamp_Sec"] = now_sec
@@ -1023,8 +1047,13 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     target_bid = current_bid if (current_bid is not None and current_bid > 0) else cur_limit_price
                     new_limit_price = round(max(0.01, min(cur_limit_price, target_bid) - slippage), 4)
                     new_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], new_limit_price, exit_qty)
-                    if new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
+                    if new_resp and isinstance(new_resp, dict) and new_resp.get("error") == "ZERO_BALANCE":
+                        if pos.get("Sell_Order_Dispatched"):
+                            logger.info("🏁 [POSITION 100% LIQUIDATED] Token balance is 0 on exchange. Trade confirmed closed.")
+                            is_filled = True
+                    elif new_resp and isinstance(new_resp, dict) and ("orderID" in new_resp or "orderId" in new_resp):
                         new_id = new_resp.get("orderID") or new_resp.get("orderId")
+                        pos["Sell_Order_Dispatched"] = True
                         pos["Sell_Order_Id"] = new_id
                         pos["Sell_Limit_Price"] = new_limit_price
                         pos["Closing_Timestamp_Sec"] = now_sec
@@ -1512,6 +1541,9 @@ class LiveExecutionStrategy(IExecutionStrategy):
             return resp if isinstance(resp, dict) else {"orderID": str(resp)}
         except Exception as e:
             logger.error(f"⚠ Failed to post Live CLOB Limit Sell Order: {e}")
+            err_str = str(e).lower()
+            if "balance is not enough" in err_str or "balance: 0" in err_str:
+                return {"error": "ZERO_BALANCE", "message": str(e)}
             return None
 
     def get_order_from_exchange(self, order_id: str) -> Optional[Dict[str, Any]]:
