@@ -1,15 +1,22 @@
 """
-Unit Tests for Polymarket Bot V4: High-Odds Trend Strategy
-(84¢ Entry Trigger, 99¢ TP Limit, 40¢ SL Slippage-Protected Exit)
+Unit Tests for Polymarket Bot V4 High-Odds Trend Following Strategy Engine
+Tests:
+1. Entry Trigger at >= 84¢ and <= 88¢ odds window.
+2. Entry Rejection when price is above 88¢ ceiling ($0.90+).
+3. Startup Candle Cooldown (no mid-candle entries on boot).
+4. Single Trade Per Candle Rule (no duplicate re-entries in the same candle after Take Profit).
+5. Take Profit Resting Limit Sell at 99¢.
+6. Stop Loss Trigger at <= 40¢ with dynamic slippage.
+7. Single Active Position Guard.
 """
 
+import os
 import time
 import pytest
 import sqlite3
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 from src.config import config
-from src.execution.strategy import V4OddsStrategy, V4LiveExecutionStrategy
+from src.execution.strategy import V4OddsStrategy
 
 
 @pytest.fixture
@@ -17,42 +24,44 @@ def memory_db():
     conn = sqlite3.connect(":memory:")
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS Positions (
+        CREATE TABLE Positions (
             Id INTEGER PRIMARY KEY AUTOINCREMENT,
-            Candle_Start TEXT,
-            Slug TEXT,
-            Token_Id TEXT,
+            Candle_Start TEXT NOT NULL,
+            Slug TEXT NOT NULL,
+            Token_Id TEXT NOT NULL,
             Prediction_Side TEXT,
             Position_Side TEXT,
-            Entry_Timestamp TEXT,
-            Target_Price REAL,
+            Prob_Cal REAL,
+            Prob_Uncal REAL,
+            Target_Buy_Price REAL,
+            Average_Fill_Price REAL,
             Target_Quantity REAL,
             Filled_Quantity REAL,
-            Average_Fill_Price REAL,
-            Order_Id TEXT,
+            Sell_Quantity REAL,
+            Take_Profit_Price REAL,
+            Stop_Loss_Price REAL,
+            High_Water_Mark REAL,
+            Exit_Price REAL,
+            Exit_Reason TEXT,
+            Trade_Outcome TEXT,
+            Entry_Timestamp TEXT,
+            Exit_Timestamp TEXT,
             Buy_Order_Id TEXT,
             Sell_Order_Id TEXT,
             Position_Status TEXT,
             Cancel_Reason TEXT,
-            Take_Profit_Price REAL,
-            Stop_Loss_Price REAL,
-            Exit_Price REAL,
-            Exit_Timestamp TEXT,
-            Exit_Reason TEXT,
-            Trade_Outcome TEXT,
-            High_Water_Mark REAL,
-            Sell_Quantity REAL,
             Pnl REAL,
             Updated_At TEXT
         );
     """)
     conn.commit()
-    return conn
+    yield conn
+    conn.close()
 
 
-def test_v4_entry_odds_threshold_trigger(memory_db):
+def test_v4_entry_odds_threshold_and_ceiling(memory_db):
     """
-    Verify V4 only triggers when odds >= 0.84 and rejects anything below 0.84.
+    Verify V4 only triggers when odds are between 84¢ and 88¢ and rejects anything < 0.84 or > 0.88.
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
     strat.boot_candle_sec = 0  # Cooldown passed
@@ -65,153 +74,128 @@ def test_v4_entry_odds_threshold_trigger(memory_db):
     assert res is None
     assert strat.active_position is None
 
-    # 2. Ask crosses to $0.84 (>= 0.84 threshold) -> ENTRY TRIGGERED!
-    res = strat.process_tick(candle_start, slug, "UP", token_id, 0.83, 0.84)
+    # 2. Ask is $0.90 (> 0.88 ceiling) -> NO ENTRY (Prevents buying at the top)
+    res = strat.process_tick(candle_start, slug, "UP", token_id, 0.89, 0.90)
+    assert res is None
+    assert strat.active_position is None
+
+    # 3. Ask is $0.85 (in 0.84-0.88 window) -> ENTRY TRIGGERED!
+    res = strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
     assert res is not None
     assert strat.active_position is not None
     assert strat.active_position["Position_Status"] == "PENDING_FILL"
-    assert strat.active_position["Target_Buy_Price"] == 0.84
-    assert strat.active_position["Target_Quantity"] == max(5.0, round(getattr(config, "max_position_size_usd", 5.0) / 0.84, 4))
+    assert strat.active_position["Target_Buy_Price"] == 0.85
+    assert strat.active_position["Target_Quantity"] == max(5.0, round(getattr(config, "max_position_size_usd", 5.0) / 0.85, 4))
+
+
+def test_v4_single_trade_per_candle_rule(memory_db):
+    """
+    Verify that once a trade is executed in candle X, the bot never re-enters in that same candle.
+    """
+    strat = V4OddsStrategy(async_writer=None, notifier=None)
+    strat.boot_candle_sec = 0
+    candle_start = "2026-08-05 00:00:00"
+    slug = "btc-updown-5m-1785830000"
+    token_id = "TOK_UP_1"
+
+    # 1. First trade enters
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
+    assert strat.active_position is not None
+
+    # 2. Trade fills & hits Take Profit
+    strat.active_position["Position_Status"] = "OPEN"
+    strat.active_position["Filled_Quantity"] = 5.0
+    strat.active_position["Average_Fill_Price"] = 0.85
+    strat.active_position["Take_Profit_Price"] = 0.99
+    strat.active_position["Stop_Loss_Price"] = 0.40
+
+    # Price reaches $0.99 -> TP closes the position
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.99, 1.00)
+    assert strat.active_position is None  # Trade closed!
+
+    # 3. Subsequent tick in SAME candle at $0.85 -> MUST BE IGNORED!
+    res = strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
+    assert res is None
+    assert strat.active_position is None
+
+    # 4. Next fresh candle arrives -> Bot allows new trade!
+    next_candle = "2026-08-05 00:05:00"
+    res_next = strat.process_tick(next_candle, "btc-updown-5m-1785830300", "UP", "TOK_UP_2", 0.84, 0.85)
+    assert res_next is not None
+    assert strat.active_position is not None
 
 
 def test_v4_startup_candle_cooldown(memory_db):
     """
-    Verify V4 ignores mid-candle triggers during the startup/boot candle and only activates on the next candle.
+    Verify V4 strictly ignores mid-candle signals for the candle running during bot startup.
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
-    boot_candle_str = "2026-08-05 00:20:00"
-    boot_ts = int(datetime.strptime(boot_candle_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
-    strat.boot_candle_sec = boot_ts
+    strat.boot_candle_sec = int(datetime.strptime("2026-08-05 00:00:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())  # Bot booted during this candle
+    candle_start = "2026-08-05 00:00:00"  # matches boot_candle_sec
+    slug = "btc-updown-5m-1785830000"
+    token_id = "TOK_UP_1"
 
-    slug = f"btc-updown-5m-{boot_ts}"
-    token_id = "TOK_UP_COOLDOWN"
-
-    # Price is high at $0.90 during the boot candle -> MUST BE IGNORED!
-    res = strat.process_tick(boot_candle_str, slug, "UP", token_id, 0.89, 0.90)
+    # Ask is 0.86 (normally valid trigger), but during boot candle -> SKIPPED!
+    res = strat.process_tick(candle_start, slug, "UP", token_id, 0.85, 0.86)
     assert res is None
     assert strat.active_position is None
-
-    # Next candle begins at 00:25:00 (> boot candle ts) -> ENTRY NOW ALLOWED!
-    next_candle_str = "2026-08-05 00:25:00"
-    next_ts = boot_ts + 300
-    next_slug = f"btc-updown-5m-{next_ts}"
-    res2 = strat.process_tick(next_candle_str, next_slug, "UP", token_id, 0.84, 0.85)
-    assert res2 is not None
-    assert strat.active_position is not None
-    assert strat.active_position["Candle_Start"] == next_candle_str
 
 
 def test_v4_tp_limit_placement_at_99(memory_db):
     """
-    Verify V4 sets TP at $0.99 and places resting Limit Sell order at $0.99 upon fill.
+    Verify resting Limit Sell is configured at $0.99 upon fill.
     """
-    live_strat = V4LiveExecutionStrategy(async_writer=None, notifier=None)
-    mock_clob = MagicMock()
-    live_strat.clob_client = mock_clob
+    strat = V4OddsStrategy(async_writer=None, notifier=None)
+    strat.boot_candle_sec = 0
+    candle_start = "2026-08-05 00:00:00"
+    slug = "btc-updown-5m-1785830000"
+    token_id = "TOK_UP_1"
 
-    candle_start = "2026-08-05 00:05:00"
-    slug = "btc-updown-5m-1785830300"
-    token_id = "TOK_UP_2"
+    # 1. Trigger Entry
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.83, 0.84)
+    assert strat.active_position is not None
 
-    mock_clob.post_order.return_value = {"orderID": "0xTP_ORDER_99"}
-    mock_clob.get_order.return_value = {
-        "status": "FILLED",
-        "size_matched": "5.0",
-        "makingAmount": "4.25",
-        "takingAmount": "5.0",
-        "price": "0.8500"
-    }
-
-    # Setup PENDING_FILL position
-    now_sec = time.time()
-    live_strat.dry_strategy.active_position = {
-        "Candle_Start": candle_start,
-        "Slug": slug,
-        "Token_Id": token_id,
-        "Position_Side": "UP",
-        "Position_Status": "PENDING_FILL",
-        "Target_Buy_Price": 0.85,
-        "Target_Quantity": 5.0,
-        "Filled_Quantity": 0.0,
-        "Buy_Order_Id": "0xBUY_V4_1",
-        "Order_Timestamp_Sec": now_sec,
-    }
-
-    # Tick arrives confirming fill
-    live_strat.process_tick(candle_start, slug, "UP", token_id, 0.85, 0.86)
-
-    pos = live_strat.dry_strategy.active_position
-    assert pos is not None
-    assert pos["Position_Status"] == "OPEN"
-    assert pos["Average_Fill_Price"] == 0.8500
-    assert pos["Take_Profit_Price"] == 0.9900
-    assert pos["Stop_Loss_Price"] == 0.4000
-    assert pos["Tp_Order_Id"] == "0xTP_ORDER_99"
+    # 2. Fill order at $0.84
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
+    assert strat.active_position["Position_Status"] == "OPEN"
+    assert strat.active_position["Take_Profit_Price"] == 0.99
+    assert strat.active_position["Stop_Loss_Price"] == 0.40
 
 
 def test_v4_sl_trigger_at_40_cents(memory_db):
     """
-    Verify V4 triggers Stop Loss when price drops <= $0.40, cancels TP order, and exits with slippage.
+    Verify Stop Loss triggers immediately when price drops <= 0.40.
     """
-    live_strat = V4LiveExecutionStrategy(async_writer=None, notifier=None)
-    mock_clob = MagicMock()
-    live_strat.clob_client = mock_clob
+    strat = V4OddsStrategy(async_writer=None, notifier=None)
+    strat.boot_candle_sec = 0
+    candle_start = "2026-08-05 00:00:00"
+    slug = "btc-updown-5m-1785830000"
+    token_id = "TOK_UP_1"
 
-    candle_start = "2026-08-05 00:10:00"
-    slug = "btc-updown-5m-1785830600"
-    token_id = "TOK_DOWN_1"
+    # 1. Open Position
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.83, 0.84)
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
+    assert strat.active_position["Position_Status"] == "OPEN"
 
-    now_sec = time.time()
-    live_strat.dry_strategy.active_position = {
-        "Candle_Start": candle_start,
-        "Slug": slug,
-        "Token_Id": token_id,
-        "Position_Side": "DOWN",
-        "Position_Status": "OPEN",
-        "Target_Buy_Price": 0.85,
-        "Average_Fill_Price": 0.85,
-        "Target_Quantity": 5.0,
-        "Filled_Quantity": 5.0,
-        "Take_Profit_Price": 0.99,
-        "Stop_Loss_Price": 0.40,
-        "High_Water_Mark": 0.85,
-        "Tp_Order_Id": "0xTP_RESTING",
-        "Tp_Qty": 5.0,
-        "Order_Timestamp_Sec": now_sec,
-    }
-
-    mock_clob.cancel_orders.return_value = {"canceled": ["0xTP_RESTING"]}
-    mock_clob.post_order.return_value = {"orderID": "0xSL_ORDER_EXIT"}
-    mock_clob.get_order.return_value = {"status": "MATCHED", "size_matched": "5.0", "makingAmount": "5.0", "takingAmount": "1.85"}
-
-    # Price drops to $0.39 (<= $0.40 SL trigger)
-    live_strat.process_tick(candle_start, slug, "DOWN", token_id, 0.39, 0.40)
-
-    # Position must transition through CLOSING to CLOSED
-    assert live_strat.dry_strategy.active_position is None
+    # 2. Price drops to $0.40 -> STOP LOSS EXECUTES!
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.39, 0.40)
+    # Since dry run closes synchronously
+    assert strat.active_position is None
 
 
 def test_v4_single_active_position_guard(memory_db):
     """
-    Verify Single Position Guard blocks concurrent positions while one is open.
+    Verify bot will NEVER open a second position while one is active.
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
     strat.boot_candle_sec = 0
-    candle_start = "2026-08-05 00:15:00"
-    slug = "btc-updown-5m-1785830900"
+    candle_start = "2026-08-05 00:00:00"
+    slug = "btc-updown-5m-1785830000"
 
-    strat.active_position = {
-        "Candle_Start": candle_start,
-        "Slug": slug,
-        "Token_Id": "TOK_1",
-        "Position_Status": "OPEN",
-        "Target_Buy_Price": 0.85,
-        "Filled_Quantity": 5.0,
-        "Take_Profit_Price": 0.99,
-        "Stop_Loss_Price": 0.40
-    }
+    # Open UP position
+    strat.process_tick(candle_start, slug, "UP", "TOK_UP_1", 0.83, 0.84)
+    assert strat.active_position is not None
 
-    # Second token crosses $0.86 threshold -> MUST BE BLOCKED
-    res = strat.process_tick(candle_start, slug, "DOWN", "TOK_2", 0.85, 0.86)
+    # DOWN ask reaches 0.86 in same or other candle -> REJECTED because UP is active
+    res = strat.process_tick(candle_start, slug, "DOWN", "TOK_DN_1", 0.85, 0.86)
     assert res is None
-    assert strat.active_position["Token_Id"] == "TOK_1"

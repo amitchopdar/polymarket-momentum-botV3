@@ -1,6 +1,6 @@
 """
 Polymarket Bot V4: High-Odds Trend Following Strategy Engine
-(84¢ Entry Trigger, 99¢ Limit Take-Profit, 40¢ Slippage-Protected Stop-Loss)
+(84¢-88¢ Entry Trigger, 99¢ Limit Take-Profit, 40¢ Slippage-Protected Stop-Loss)
 """
 
 import os
@@ -33,7 +33,8 @@ class IExecutionStrategy(ABC):
 class V4OddsStrategy(IExecutionStrategy):
     """
     Polymarket Bot V4 Strategy:
-    1. Entry: Triggers BUY when UP or DOWN token odds >= 84 cents ($0.84).
+    1. Entry: Triggers BUY when UP or DOWN token odds are between 84¢ and 88¢ ($0.84 <= Ask <= $0.88).
+       - Max 1 trade per 5m candle (never re-enters in the same candle after Take-Profit/Stop-Loss).
        - Skips entries during startup/boot candle to avoid entering stale mid-candle surges.
     2. Take Profit: Resting Limit Sell order placed at 99 cents ($0.99).
     3. Stop Loss: Triggers when price drops <= 40 cents ($0.40).
@@ -49,6 +50,7 @@ class V4OddsStrategy(IExecutionStrategy):
         self.tick_buffers: Dict[str, List[Tuple[float, float, float]]] = {}
         # Record startup candle boundary so the bot never enters mid-candle on reboot
         self.boot_candle_sec = (int(time.time()) // 300) * 300
+        self.last_traded_candle: Optional[str] = None
         self._last_cooldown_log = 0.0
 
     def cancel_order_on_exchange(self, order_id: str) -> bool:
@@ -92,7 +94,11 @@ class V4OddsStrategy(IExecutionStrategy):
         if self.active_position is not None:
             return None
 
-        # 5. Startup Candle Cooldown: Skip new trades for the candle active during bot boot
+        # 5. Single Entry Per Candle Rule: Block re-entering in the same candle after a trade closed
+        if self.last_traded_candle == candle_start:
+            return None
+
+        # 6. Startup Candle Cooldown: Skip new trades for the candle active during bot boot
         candle_start_sec = 0
         try:
             dt_obj = datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
@@ -106,10 +112,11 @@ class V4OddsStrategy(IExecutionStrategy):
                 logger.info(f"⏳ [STARTUP CANDLE COOLDOWN] Ignoring mid-candle triggers for {candle_start}. New entries start next candle!")
             return None
 
-        # 6. V4 Entry Trigger: Odds Threshold >= 84 Cents ($0.84)
-        entry_thresh = getattr(config, "v4_entry_odds_threshold", 0.84)
+        # 7. V4 Entry Trigger: 84¢ to 88¢ Odds Window ($0.84 <= Ask <= $0.88)
+        min_thresh = getattr(config, "v4_entry_odds_threshold", 0.84)
+        max_thresh = getattr(config, "v4_max_entry_odds_ceiling", 0.88)
 
-        if current_ask >= entry_thresh:
+        if min_thresh <= current_ask <= max_thresh:
             # 15s Candle Entry Cutoff
             sec_in_candle = int(now_sec - candle_start_sec)
             if 285 <= sec_in_candle < 300:
@@ -136,6 +143,7 @@ class V4OddsStrategy(IExecutionStrategy):
                 "Buy_Order_Id": f"V4_ORDER_{int(now_sec*1000)}"
             }
             self.active_position = pre_pos
+            self.last_traded_candle = candle_start
 
             if self.live_strategy and self.live_strategy.clob_client:
                 pos = self.live_strategy.execute_entry(

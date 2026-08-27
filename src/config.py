@@ -18,10 +18,11 @@ except ImportError:
 # ==============================================================================
 # Bot V4 High-Odds Trend Trigger Parameters
 USER_V4_ENTRY_ODDS_THRESHOLD = 0.84        # Enter BUY when UP or DOWN odds >= 84 cents ($0.84)
+USER_V4_MAX_ENTRY_ODDS_CEILING = 0.88      # Max entry odds ceiling (do not buy if price has already surged > 88 cents)
 USER_V4_TAKE_PROFIT_PRICE = 0.99           # Resting Limit Sell Take Profit target ($0.99)
 USER_V4_STOP_LOSS_PRICE = 0.40             # Trigger Stop Loss when odds drop <= 40 cents ($0.40)
 USER_V4_STOP_LOSS_SLIPPAGE_CENTS = 0.02    # 2 cents slippage discount for aggressive SL limit sell ($0.02)
-USER_V4_MAX_POSITION_SIZE_USD = 5.0        # Max position size per trade ($4.00 USDC)
+USER_V4_MAX_POSITION_SIZE_USD = 5.0        # Max position size per trade ($5.00 USDC)
 USER_V4_MAX_ACTIVE_POSITIONS = 1           # Single active position limit across bot (1 position)
 USER_V4_ORDER_TIMEOUT_SEC = 5.0            # 5 seconds order cancellation timeout
 # ==============================================================================
@@ -62,6 +63,7 @@ class BotConfig:
 
     # Bot V4 Strategy Configuration (Overridable via env vars)
     v4_entry_odds_threshold: float = float(os.getenv("V4_ENTRY_ODDS_THRESHOLD", str(USER_V4_ENTRY_ODDS_THRESHOLD)))
+    v4_max_entry_odds_ceiling: float = float(os.getenv("V4_MAX_ENTRY_ODDS_CEILING", str(USER_V4_MAX_ENTRY_ODDS_CEILING)))
     v4_take_profit_price: float = float(os.getenv("V4_TAKE_PROFIT_PRICE", str(USER_V4_TAKE_PROFIT_PRICE)))
     v4_stop_loss_price: float = float(os.getenv("V4_STOP_LOSS_PRICE", str(USER_V4_STOP_LOSS_PRICE)))
     v4_stop_loss_slippage_cents: float = float(os.getenv("V4_STOP_LOSS_SLIPPAGE_CENTS", str(USER_V4_STOP_LOSS_SLIPPAGE_CENTS)))
