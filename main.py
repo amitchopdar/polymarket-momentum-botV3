@@ -1,27 +1,29 @@
 """
-Polymarket Bot V4: High-Odds Trend Strategy Engine
-(84¢ Entry Trigger, 99¢ TP Limit, 40¢ SL Slippage-Protected Exit)
+Polymarket Bot V4 Main Entry Point
+High-Odds Trend Strategy Engine (84¢ Entry Trigger, 99¢ TP Limit, 40¢ SL Slippage-Protected Exit)
 """
 
-import os
 import sys
 import time
 import signal
 import logging
+import threading
+from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from src.config import config
 from src.database.connection import PolyDBManager, AsyncDBWriter
-from src.polymarket.ws_client import PolymarketWSClient
-from src.polymarket.token_resolver import PolymarketTokenResolver
-from src.polymarket.minute_tracker import MinuteOddsTracker
-from src.notifications.telegram_notifier import TelegramNotifier
-from src.notifications.telegram_bot import TelegramCommandRouter
+from src.polymarket.token_resolver import PolymarketTokenResolver, MinuteOddsTracker
+from src.polymarket.polymarket_ws import PolymarketWSClient
 from src.execution.strategy import V4OddsStrategy, V4LiveExecutionStrategy
+from src.notifications.notifier import TelegramNotifier
+from src.notifications.telegram_bot import TelegramCommandRouter
 
+# Configure logging to stdout
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("PolyBotMainV4")
 
