@@ -1,42 +1,43 @@
 """
-Polymarket Bot V2 Main Entry Point
-Tick-by-Tick Odds Momentum Strategy Engine (Standalone Polymarket Ingestion)
+Polymarket Bot V4: High-Odds Trend Strategy Engine
+(84¢ Entry Trigger, 99¢ TP Limit, 40¢ SL Slippage-Protected Exit)
 """
 
+import os
 import sys
 import time
 import signal
 import logging
-import threading
-from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 
 from src.config import config
 from src.database.connection import PolyDBManager, AsyncDBWriter
-from src.polymarket.token_resolver import PolymarketTokenResolver, MinuteOddsTracker
-from src.polymarket.polymarket_ws import PolymarketWSClient
-from src.execution.strategy import V2OddsMomentumStrategy, LiveExecutionStrategy
-from src.notifications.notifier import TelegramNotifier
+from src.polymarket.ws_client import PolymarketWSClient
+from src.polymarket.token_resolver import PolymarketTokenResolver
+from src.polymarket.minute_tracker import MinuteOddsTracker
+from src.notifications.telegram_notifier import TelegramNotifier
 from src.notifications.telegram_bot import TelegramCommandRouter
+from src.execution.strategy import V4OddsStrategy, V4LiveExecutionStrategy
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+logger = logging.getLogger("PolyBotMainV4")
 
-logger = logging.getLogger("PolyBotMainV2")
 
-
-class PolymarketBot:
+class PolymarketBotV4:
     """
-    Polymarket Bot V2 Orchestration Engine.
-    Operates strictly on Polymarket CLOB WebSocket ticks (Binance feeds and ML models removed).
+    Main Bot V4 Orchestrator:
+    - Real-time Polymarket WebSocket ingestion (UP & DOWN orderbooks).
+    - T-5s Pre-Flight Token Resolution & T=0 Boundary Handoff.
+    - V4 High-Odds Trend Strategy (84¢ Entry, 99¢ TP, 40¢ SL).
+    - SQLite Async Persistence (`PolyDB_V4.sqlite`).
+    - Telegram remote commands & trade execution notifications.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or config.db_path
+    def __init__(self):
+        self.db_path = config.db_path
         self.db_manager = PolyDBManager(db_path=self.db_path)
         self.async_writer = AsyncDBWriter(self.db_manager)
 
@@ -49,13 +50,13 @@ class PolymarketBot:
         self.notifier = TelegramNotifier()
         self.telegram_bot = TelegramCommandRouter(self.notifier, db_path=self.db_path)
 
-        # V2 / V3 Odds Momentum Strategy Engine (Select Live vs Dry Run based on config)
+        # V4 Odds Strategy Engine (Live vs Dry Run based on config)
         if not config.is_dry_run():
-            logger.info("⚡ [LIVE STRATEGY ENGINE] Instantiating LiveExecutionStrategy with authenticated Polymarket CLOB client...")
-            self.v2_strategy = LiveExecutionStrategy(self.async_writer, notifier=self.notifier)
+            logger.info("⚡ [V4 LIVE STRATEGY ENGINE] Instantiating V4LiveExecutionStrategy with authenticated Polymarket CLOB client...")
+            self.v4_strategy = V4LiveExecutionStrategy(self.async_writer, notifier=self.notifier)
         else:
-            logger.info("📄 [DRY RUN STRATEGY ENGINE] Instantiating DryExecutionStrategy (Paper Simulation)...")
-            self.v2_strategy = V2OddsMomentumStrategy(self.async_writer, notifier=self.notifier)
+            logger.info("📄 [V4 DRY RUN STRATEGY ENGINE] Instantiating V4OddsStrategy (Paper Simulation)...")
+            self.v4_strategy = V4OddsStrategy(self.async_writer, notifier=self.notifier)
 
         self.running = False
         self._last_preflight_sec = -1
@@ -66,12 +67,13 @@ class PolymarketBot:
         Starts database writer, Telegram services, and initial Polymarket WebSocket subscription.
         """
         logger.info("==================================================================")
-        logger.info("🚀 STARTING POLYMARKET BOT V3 (0% Fee Maker & 5s Order Timeout Engine)")
+        logger.info("🚀 STARTING POLYMARKET BOT V4 (High-Odds Trend Following Strategy)")
         logger.info(f"   Execution Mode : {config.execution_mode}")
         logger.info(f"   Database Path  : {self.db_path}")
-        logger.info(f"   Strategy       : +{config.v2_momentum_threshold_cents} Cent Shift in {config.v2_momentum_window_sec}s | Min Odds Floor=${config.v2_min_entry_odds_floor:.2f}")
-        logger.info(f"   Maker Entry    : Limit Buy at Ask - ${config.v3_maker_offset_cents:.2f} (0% Fee) | Timeout={config.v3_maker_order_timeout_sec:.1f}s")
-        logger.info(f"   Risk Exits     : TP=+${config.v2_take_profit_cents:.2f} (+{config.v2_take_profit_cents*100:.0f}¢) | Trailing SL=-${config.v2_trailing_sl_distance_cents:.2f} (-{config.v2_trailing_sl_distance_cents*100:.0f}¢)")
+        logger.info(f"   Entry Trigger  : Buy when UP/DOWN Ask >= ${config.v4_entry_odds_threshold:.2f} ({config.v4_entry_odds_threshold*100:.0f}¢)")
+        logger.info(f"   Take Profit    : Resting Limit Sell at ${config.v4_take_profit_price:.2f} ({config.v4_take_profit_price*100:.0f}¢)")
+        logger.info(f"   Stop Loss      : Limit Sell at Bid - ${config.v4_stop_loss_slippage_cents:.2f} when Bid <= ${config.v4_stop_loss_price:.2f} ({config.v4_stop_loss_price*100:.0f}¢)")
+        logger.info(f"   Max Allocation : ${config.max_position_size_usd:.2f} USD per trade | Max Positions={config.max_active_positions}")
         logger.info("==================================================================")
 
         self.running = True
@@ -84,7 +86,6 @@ class PolymarketBot:
         # Initial T0 token resolution for current active 5m candle
         now_ts = int(time.time())
         curr_candle_sec = (now_ts // 300) * 300
-        curr_candle_ts_ms = curr_candle_sec * 1000
 
         resolved = self.token_resolver.get_or_resolve_candle_tokens(curr_candle_sec)
         if resolved:
@@ -122,12 +123,11 @@ class PolymarketBot:
         if hasattr(self, "db_manager"):
             self.db_manager.close_thread_connection()
 
-        logger.info("Shutdown complete. Polymarket Bot V2 stopped.")
+        logger.info("Shutdown complete. Polymarket Bot V4 stopped.")
 
     def _process_live_ticks(self) -> None:
         """
-        Fetches live orderbook bids/asks from Polymarket WebSocket stream, evaluates V2 strategy,
-        and logs real-time tick status.
+        Fetches live orderbook bids/asks from Polymarket WebSocket stream and evaluates V4 strategy.
         """
         now = time.time()
         candle_start_sec = (int(now) // 300) * 300
@@ -141,11 +141,11 @@ class PolymarketBot:
 
         up_bid, up_ask, dn_bid, dn_ask = self.polymarket_ws.get_live_bid_ask(up_tok, dn_tok)
 
-        # 1. Feed real-time ticks into V2 Odds Momentum Strategy Engine
+        # 1. Feed real-time ticks into V4 Strategy Engine
         if up_tok and up_ask is not None:
-            self.v2_strategy.process_tick(candle_start_str, slug, "UP", up_tok, up_bid, up_ask)
+            self.v4_strategy.process_tick(candle_start_str, slug, "UP", up_tok, up_bid, up_ask)
         if dn_tok and dn_ask is not None:
-            self.v2_strategy.process_tick(candle_start_str, slug, "DOWN", dn_tok, dn_bid, dn_ask)
+            self.v4_strategy.process_tick(candle_start_str, slug, "DOWN", dn_tok, dn_bid, dn_ask)
 
         # 2. Log status every 3 seconds
         if (now - self._last_tick_log) >= 3.0:
@@ -156,12 +156,12 @@ class PolymarketBot:
                 self.minute_tracker.update_tick(int(now), mid_up, mid_dn, candle_start_sec)
 
                 logger.info(
-                    f"[V2 STREAM TICK] Candle ({candle_start_str}) | "
+                    f"[V4 STREAM TICK] Candle ({candle_start_str}) | "
                     f"UP (Bid: ${up_bid:.3f} / Ask: ${up_ask:.3f}) | "
                     f"DOWN (Bid: ${dn_bid:.3f} / Ask: ${dn_ask:.3f})"
                 )
             else:
-                logger.info(f"[V2 STREAM TICK] Candle ({candle_start_str}) | Polymarket Odds: [WAITING FOR WS TIK]")
+                logger.info(f"[V4 STREAM TICK] Candle ({candle_start_str}) | Polymarket Odds: [WAITING FOR WS TICK]")
 
     def run_loop(self) -> None:
         """
@@ -183,7 +183,7 @@ class PolymarketBot:
                 now_ts = int(time.time())
                 now_sec = now_ts % 300
 
-                # T-5s Pre-Flight Token Resolution Trigger (at 4m55s / 295s into interval)
+                # T-5s Pre-Flight Token Resolution Trigger (at 295s into interval)
                 if now_sec == 295 and self._last_preflight_sec != now_ts:
                     self._last_preflight_sec = now_ts
                     curr_candle_ts_ms = (now_ts // 300) * 300 * 1000
@@ -192,18 +192,16 @@ class PolymarketBot:
                     curr_dn = curr_tok_info[2] if curr_tok_info else None
 
                     next_candle_ts_ms = (curr_candle_ts_ms // 1000 + 300) * 1000
-                    logger.info("T-5s Pre-Flight Trigger Fired. Resolving Polymarket token contract IDs...")
+                    logger.info("T-5s Pre-Flight Trigger Fired. Resolving upcoming Polymarket tokens...")
                     resolved = self.token_resolver.resolve_next_candle_tokens(next_candle_ts_ms)
                     next_up = resolved[1] if resolved else None
                     next_dn = resolved[2] if resolved else None
 
-                    # Subscribe to BOTH current active candle tokens AND upcoming candle tokens
                     self.polymarket_ws.subscribe_tokens(curr_up, curr_dn, next_up, next_dn)
 
-                # T=0s 5m Candle Boundary Handoff Trigger (reconnect for new candle tokens)
+                # T=0s 5m Candle Boundary Handoff Trigger
                 if now_sec == 0 and getattr(self, "_last_boundary_sec", -1) != now_ts:
                     self._last_boundary_sec = now_ts
-                    new_active_ts_ms = (now_ts // 300) * 300 * 1000
                     new_tok_info = self.token_resolver.get_or_resolve_candle_tokens(now_ts // 300 * 300)
                     if new_tok_info:
                         new_up, new_dn = new_tok_info[0], new_tok_info[1]
@@ -222,7 +220,7 @@ class PolymarketBot:
 
 
 def main():
-    bot = PolymarketBot()
+    bot = PolymarketBotV4()
     bot.run_loop()
 
 
