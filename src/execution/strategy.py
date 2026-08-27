@@ -117,7 +117,7 @@ class V4OddsStrategy(IExecutionStrategy):
                 return None
 
             limit_buy_price = current_ask
-            raw_qty = round(getattr(config, "max_position_size_usd", 4.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            raw_qty = round(getattr(config, "max_position_size_usd", 5.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
             target_qty = max(5.0, raw_qty)
             now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -145,7 +145,7 @@ class V4OddsStrategy(IExecutionStrategy):
                     prob_cal=0.50,
                     prob_uncal=0.50,
                     target_price=current_ask,
-                    position_usd=getattr(config, "max_position_size_usd", 4.0),
+                    position_usd=getattr(config, "max_position_size_usd", 5.0),
                     token_id=token_id,
                     current_bid=current_bid,
                     current_ask=current_ask
@@ -682,20 +682,48 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
             try:
                 try:
                     from py_clob_client_v2 import ClobClient
-                    from py_clob_client_v2.clob_types import ApiCreds
+                    from py_clob_client_v2.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
                 except ImportError:
                     from py_clob_client.client import ClobClient
-                    from py_clob_client.clob_types import ApiCreds
+                    from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
-                creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase) if api_key and secret and passphrase else None
+                sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3" if funder else "0").strip("\"' "))
+                host = getattr(config, "polymarket_clob_url", "https://clob.polymarket.com")
+
+                logger.info(f"🔑 [L1 AUTH] Initializing EIP-712 L1 Auth Client (signature_type={sig_type}, funder={funder[:10] if funder else 'None'})...")
                 self.clob_client = ClobClient(
-                    host="https://clob.polymarket.com",
+                    host=host,
                     key=private_key,
                     chain_id=137,
-                    creds=creds,
+                    signature_type=sig_type,
                     funder=funder
                 )
-                logger.info("✓ [V4 CLOB CLIENT INITIALIZED] Authenticated Polymarket Live CLOB client connected.")
+
+                creds = None
+                mode_label = "Deposit Wallet" if (sig_type == 3 and funder) else "EOA"
+                logger.info(f"🔑 [L2 CREDS] Auto-deriving fresh CLOB API Credentials ({mode_label} mode)...")
+                try:
+                    derived_creds = self.clob_client.create_or_derive_api_key()
+                    if derived_creds:
+                        creds = ApiCreds(
+                            api_key=derived_creds.api_key,
+                            api_secret=derived_creds.api_secret,
+                            api_passphrase=derived_creds.api_passphrase
+                        )
+                        logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
+                except Exception as derive_err:
+                    logger.warning(f"⚠ L2 credential auto-derivation notice: {derive_err}")
+                    if api_key and secret and passphrase:
+                        creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase)
+                        logger.info(f"🔑 [L2 CREDS] Falling back to .env credentials: {api_key[:8]}...")
+
+                if creds:
+                    self.clob_client.set_api_creds(creds)
+                    logger.info("✓ [V4 CLOB CLIENT INITIALIZED] Authenticated Polymarket Live CLOB client connected.")
+                else:
+                    logger.warning("⚠ No valid API credentials resolved. CLOB client will not be able to place orders.")
+                    self.clob_client = None
+                    return
             except Exception as e:
                 logger.error(f"Failed to initialize V4 Live CLOB client: {e}")
                 self.clob_client = None
