@@ -1,6 +1,6 @@
 """
 Polymarket Bot V4: High-Odds Trend Following Strategy Engine
-(84¢-88¢ Entry Trigger, 99¢ Limit Take-Profit, 40¢ Slippage-Protected Stop-Loss)
+(84¢-88¢ Entry Trigger, 99¢ Limit Take-Profit with Active Exchange Tracking, 40¢ Slippage-Protected Stop-Loss)
 """
 
 import os
@@ -36,7 +36,7 @@ class V4OddsStrategy(IExecutionStrategy):
     1. Entry: Triggers BUY when UP or DOWN token odds are between 84¢ and 88¢ ($0.84 <= Ask <= $0.88).
        - Max 1 trade per 5m candle (never re-enters in the same candle after Take-Profit/Stop-Loss).
        - Skips entries during startup/boot candle to avoid entering stale mid-candle surges.
-    2. Take Profit: Resting Limit Sell order placed at 99 cents ($0.99).
+    2. Take Profit: Resting Limit Sell order placed at 99 cents ($0.99) with active exchange status polling.
     3. Stop Loss: Triggers when price drops <= 40 cents ($0.40).
        Executes Limit Sell at (current_bid - slippage) with dynamic 3.0s re-chasing loop.
     4. Fill Reconciliation & Zero-Balance Liquidation Guard.
@@ -564,7 +564,46 @@ class V4OddsStrategy(IExecutionStrategy):
         hwm = max(pos.get("High_Water_Mark", entry_price), peak_price)
         pos["High_Water_Mark"] = hwm
 
-        # Persistent TP limit order retry at $0.99
+        # 1. Active Resting Take-Profit Exchange Status Polling
+        # Real-time exchange verification: check if Polymarket matched our resting 99¢ Limit Sell
+        if self.live_strategy and self.live_strategy.clob_client and pos.get("Tp_Order_Id") and not str(pos["Tp_Order_Id"]).startswith("V4_"):
+            last_tp_poll = pos.get("_last_tp_poll_sec", 0.0)
+            if (now_ts - last_tp_poll) >= 1.5:
+                pos["_last_tp_poll_sec"] = now_ts
+                tp_order_info = self.live_strategy.get_order_from_exchange(pos["Tp_Order_Id"])
+                if tp_order_info and isinstance(tp_order_info, dict):
+                    tp_status = str(tp_order_info.get("status", "")).upper()
+                    tp_matched = round(float(tp_order_info.get("size_matched") or tp_order_info.get("sizeMatched") or 0.0), 4)
+                    tp_making = float(tp_order_info.get("makingAmount") or tp_order_info.get("making_amount") or 0.0)
+                    tp_taking = float(tp_order_info.get("takingAmount") or tp_order_info.get("taking_amount") or 0.0)
+
+                    tp_real_price = tp_price
+                    if tp_making > 0 and tp_taking > 0:
+                        tp_real_price = round(tp_taking / tp_making, 4)
+                    elif tp_order_info.get("price"):
+                        try:
+                            tp_real_price = float(tp_order_info["price"])
+                        except Exception:
+                            pass
+
+                    if tp_status in ("MATCHED", "FILLED", "CLOSED") or tp_matched >= (filled_qty - 0.01):
+                        logger.info(
+                            f"🎯 [V4 TP ORDER FILLED ON POLYMARKET] Order {pos['Tp_Order_Id']} filled "
+                            f"{tp_matched:.4f}/{filled_qty:.4f} shares at ${tp_real_price:.4f} on exchange!"
+                        )
+                        pos["Exit_Price"] = tp_real_price
+                        pos["Exit_Quantity"] = tp_matched if tp_matched > 0 else filled_qty
+                        pos["Exit_Reason"] = "TAKE_PROFIT"
+                        pos["Trade_Outcome"] = "WIN"
+                        pos["Sell_Order_Id"] = pos["Tp_Order_Id"]
+                        pos["Closing_Timestamp_Sec"] = now_ts
+                        pos["Position_Status"] = "CLOSING"
+                        pnl = round((tp_real_price - entry_price) * pos["Exit_Quantity"], 4)
+                        pos["Pnl"] = pnl
+                        self._evaluate_closing_position(current_bid, current_ask)
+                        return pos
+
+        # 2. Persistent TP limit order retry at $0.99
         prev_tp_qty = pos.get("Tp_Qty", 0.0)
         if self.live_strategy and self.live_strategy.clob_client and (not pos.get("Tp_Order_Id") or prev_tp_qty != filled_qty) and filled_qty > 0:
             if pos.get("Tp_Order_Id"):
