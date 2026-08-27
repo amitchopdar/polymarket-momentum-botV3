@@ -21,7 +21,7 @@ USER_V4_ENTRY_ODDS_THRESHOLD = 0.84        # Enter BUY when UP or DOWN odds >= 8
 USER_V4_TAKE_PROFIT_PRICE = 0.99           # Resting Limit Sell Take Profit target ($0.99)
 USER_V4_STOP_LOSS_PRICE = 0.40             # Trigger Stop Loss when odds drop <= 40 cents ($0.40)
 USER_V4_STOP_LOSS_SLIPPAGE_CENTS = 0.02    # 2 cents slippage discount for aggressive SL limit sell ($0.02)
-USER_V4_MAX_POSITION_SIZE_USD = 4.0        # Max position size per trade ($4.00 USDC)
+USER_V4_MAX_POSITION_SIZE_USD = 5.0        # Max position size per trade ($4.00 USDC)
 USER_V4_MAX_ACTIVE_POSITIONS = 1           # Single active position limit across bot (1 position)
 USER_V4_ORDER_TIMEOUT_SEC = 5.0            # 5 seconds order cancellation timeout
 # ==============================================================================

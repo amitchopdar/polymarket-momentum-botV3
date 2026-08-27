@@ -71,7 +71,7 @@ def test_v4_entry_odds_threshold_trigger(memory_db):
     assert strat.active_position is not None
     assert strat.active_position["Position_Status"] == "PENDING_FILL"
     assert strat.active_position["Target_Buy_Price"] == 0.84
-    assert strat.active_position["Target_Quantity"] == max(5.0, round(4.0 / 0.84, 4))
+    assert strat.active_position["Target_Quantity"] == max(5.0, round(getattr(config, "max_position_size_usd", 5.0) / 0.84, 4))
 
 
 def test_v4_startup_candle_cooldown(memory_db):
