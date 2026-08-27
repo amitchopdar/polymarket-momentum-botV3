@@ -657,6 +657,7 @@ class V4OddsStrategy(IExecutionStrategy):
 class V4LiveExecutionStrategy(IExecutionStrategy):
     """
     Live Execution Strategy Wrapper for Bot V4.
+    Integrates Polymarket CLOB REST API client and EIP-712 cryptographic signature handling.
     """
 
     def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None):
@@ -724,6 +725,15 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
                     logger.warning("⚠ No valid API credentials resolved. CLOB client will not be able to place orders.")
                     self.clob_client = None
                     return
+
+                # Synchronize CLOB Balance & Allowance Cache
+                try:
+                    logger.info("🔄 [CLOB CACHE SYNC] Synchronizing CLOB balance & allowance cache with Polygon blockchain...")
+                    self.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+                    logger.info("✅ [CLOB CACHE SYNC] Balance & Allowance cache successfully synchronized!")
+                except Exception as sync_err:
+                    logger.warning(f"⚠ Cache sync notice: {sync_err}")
+
             except Exception as e:
                 logger.error(f"Failed to initialize V4 Live CLOB client: {e}")
                 self.clob_client = None
@@ -749,11 +759,7 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
 
         try:
             try:
-                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType, BalanceAllowanceParams, AssetType
-                try:
-                    self.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-                except Exception as sync_err:
-                    logger.warning(f"Collateral allowance update notice: {sync_err}")
+                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
             except ImportError:
                 from py_clob_client.clob_types import OrderArgs, OrderType
 
@@ -773,8 +779,18 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
             signed_order = self.clob_client.create_order(order_args)
             resp = self.clob_client.post_order(signed_order, OrderType.GTC)
 
-            order_id = resp.get("orderID") if isinstance(resp, dict) else str(resp)
-            now_dt = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            order_id = None
+            if isinstance(resp, dict):
+                order_id = resp.get("orderID") or resp.get("orderId")
+            elif isinstance(resp, str) and resp.startswith("0x"):
+                order_id = resp
+
+            if not order_id:
+                logger.error(f"❌ [V4 LIVE CLOB ORDER REJECTED] Response: {resp}")
+                return None
+
+            now_ts = time.time()
+            now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
             pos = {
                 "Candle_Start": candle_start,
@@ -792,7 +808,7 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
                 "Stop_Loss_Price": getattr(config, "v4_stop_loss_price", 0.40),
                 "High_Water_Mark": limit_buy_price,
                 "Entry_Timestamp": now_dt,
-                "Order_Timestamp_Sec": time.time(),
+                "Order_Timestamp_Sec": now_ts,
                 "Buy_Order_Id": order_id,
                 "Order_Id": order_id,
                 "Position_Status": "PENDING_FILL",
