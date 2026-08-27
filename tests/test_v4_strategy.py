@@ -6,6 +6,7 @@ Unit Tests for Polymarket Bot V4: High-Odds Trend Strategy
 import time
 import pytest
 import sqlite3
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from src.config import config
 from src.execution.strategy import V4OddsStrategy, V4LiveExecutionStrategy
@@ -54,6 +55,7 @@ def test_v4_entry_odds_threshold_trigger(memory_db):
     Verify V4 only triggers when odds >= 0.84 and rejects anything below 0.84.
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
+    strat.boot_candle_sec = 0  # Cooldown passed
     candle_start = "2026-08-05 00:00:00"
     slug = "btc-updown-5m-1785830000"
     token_id = "TOK_UP_1"
@@ -70,6 +72,33 @@ def test_v4_entry_odds_threshold_trigger(memory_db):
     assert strat.active_position["Position_Status"] == "PENDING_FILL"
     assert strat.active_position["Target_Buy_Price"] == 0.84
     assert strat.active_position["Target_Quantity"] == max(5.0, round(4.0 / 0.84, 4))
+
+
+def test_v4_startup_candle_cooldown(memory_db):
+    """
+    Verify V4 ignores mid-candle triggers during the startup/boot candle and only activates on the next candle.
+    """
+    strat = V4OddsStrategy(async_writer=None, notifier=None)
+    boot_candle_str = "2026-08-05 00:20:00"
+    boot_ts = int(datetime.strptime(boot_candle_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+    strat.boot_candle_sec = boot_ts
+
+    slug = f"btc-updown-5m-{boot_ts}"
+    token_id = "TOK_UP_COOLDOWN"
+
+    # Price is high at $0.90 during the boot candle -> MUST BE IGNORED!
+    res = strat.process_tick(boot_candle_str, slug, "UP", token_id, 0.89, 0.90)
+    assert res is None
+    assert strat.active_position is None
+
+    # Next candle begins at 00:25:00 (> boot candle ts) -> ENTRY NOW ALLOWED!
+    next_candle_str = "2026-08-05 00:25:00"
+    next_ts = boot_ts + 300
+    next_slug = f"btc-updown-5m-{next_ts}"
+    res2 = strat.process_tick(next_candle_str, next_slug, "UP", token_id, 0.84, 0.85)
+    assert res2 is not None
+    assert strat.active_position is not None
+    assert strat.active_position["Candle_Start"] == next_candle_str
 
 
 def test_v4_tp_limit_placement_at_99(memory_db):
@@ -167,6 +196,7 @@ def test_v4_single_active_position_guard(memory_db):
     Verify Single Position Guard blocks concurrent positions while one is open.
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
+    strat.boot_candle_sec = 0
     candle_start = "2026-08-05 00:15:00"
     slug = "btc-updown-5m-1785830900"
 

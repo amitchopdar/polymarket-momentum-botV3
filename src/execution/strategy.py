@@ -34,6 +34,7 @@ class V4OddsStrategy(IExecutionStrategy):
     """
     Polymarket Bot V4 Strategy:
     1. Entry: Triggers BUY when UP or DOWN token odds >= 84 cents ($0.84).
+       - Skips entries during startup/boot candle to avoid entering stale mid-candle surges.
     2. Take Profit: Resting Limit Sell order placed at 99 cents ($0.99).
     3. Stop Loss: Triggers when price drops <= 40 cents ($0.40).
        Executes Limit Sell at (current_bid - slippage) with dynamic 3.0s re-chasing loop.
@@ -46,6 +47,9 @@ class V4OddsStrategy(IExecutionStrategy):
         self.live_strategy = live_strategy
         self.active_position: Optional[Dict[str, Any]] = None
         self.tick_buffers: Dict[str, List[Tuple[float, float, float]]] = {}
+        # Record startup candle boundary so the bot never enters mid-candle on reboot
+        self.boot_candle_sec = (int(time.time()) // 300) * 300
+        self._last_cooldown_log = 0.0
 
     def cancel_order_on_exchange(self, order_id: str) -> bool:
         if self.live_strategy and hasattr(self.live_strategy, "cancel_order_on_exchange"):
@@ -88,20 +92,29 @@ class V4OddsStrategy(IExecutionStrategy):
         if self.active_position is not None:
             return None
 
-        # 5. V4 Entry Trigger: Odds Threshold >= 84 Cents ($0.84)
+        # 5. Startup Candle Cooldown: Skip new trades for the candle active during bot boot
+        candle_start_sec = 0
+        try:
+            dt_obj = datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            candle_start_sec = int(dt_obj.timestamp())
+        except Exception:
+            candle_start_sec = (int(now_sec) // 300) * 300
+
+        if candle_start_sec <= self.boot_candle_sec:
+            if (now_sec - self._last_cooldown_log) >= 10.0:
+                self._last_cooldown_log = now_sec
+                logger.info(f"⏳ [STARTUP CANDLE COOLDOWN] Ignoring mid-candle triggers for {candle_start}. New entries start next candle!")
+            return None
+
+        # 6. V4 Entry Trigger: Odds Threshold >= 84 Cents ($0.84)
         entry_thresh = getattr(config, "v4_entry_odds_threshold", 0.84)
 
         if current_ask >= entry_thresh:
             # 15s Candle Entry Cutoff
-            try:
-                dt_obj = datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                candle_start_ts = dt_obj.timestamp()
-                sec_in_candle = int(now_sec - candle_start_ts)
-                if 285 <= sec_in_candle < 300:
-                    logger.info(f"⌛ [15s CANDLE ENTRY CUTOFF] Skipping V4 entry at {sec_in_candle}s into candle.")
-                    return None
-            except Exception:
-                pass
+            sec_in_candle = int(now_sec - candle_start_sec)
+            if 285 <= sec_in_candle < 300:
+                logger.info(f"⌛ [15s CANDLE ENTRY CUTOFF] Skipping V4 entry at {sec_in_candle}s into candle.")
+                return None
 
             limit_buy_price = current_ask
             raw_qty = round(getattr(config, "max_position_size_usd", 4.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0

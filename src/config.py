@@ -6,9 +6,12 @@ Global Configuration for Polymarket Momentum Bot V4
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
-from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # ==============================================================================
 # USER-FACING ADJUSTABLE PARAMETERS (Sprint 4: Bot V4 High-Odds Strategy)
