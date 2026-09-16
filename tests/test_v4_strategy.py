@@ -5,7 +5,7 @@ Tests:
 2. Entry Rejection when price is above 88¢ ceiling ($0.90+).
 3. Startup Candle Cooldown (no mid-candle entries on boot).
 4. Single Trade Per Candle Rule (no duplicate re-entries in the same candle after Take Profit).
-5. Take Profit Resting Limit Sell at 99¢.
+5. Dynamic Take Profit Target at Entry + 7¢ (e.g., 84¢ -> 91¢).
 6. Stop Loss Trigger at <= 40¢ with dynamic slippage.
 7. Single Active Position Guard.
 """
@@ -98,19 +98,19 @@ def test_v4_single_trade_per_candle_rule(memory_db):
     slug = "btc-updown-5m-1785830000"
     token_id = "TOK_UP_1"
 
-    # 1. First trade enters
+    # 1. First trade enters at 85¢
     strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
     assert strat.active_position is not None
 
-    # 2. Trade fills & hits Take Profit
+    # 2. Trade fills at 85¢ -> TP target is 85¢ + 7¢ = 92¢
     strat.active_position["Position_Status"] = "OPEN"
     strat.active_position["Filled_Quantity"] = 5.0
     strat.active_position["Average_Fill_Price"] = 0.85
-    strat.active_position["Take_Profit_Price"] = 0.99
+    strat.active_position["Take_Profit_Price"] = 0.92
     strat.active_position["Stop_Loss_Price"] = 0.40
 
-    # Price reaches $0.99 -> TP closes the position
-    strat.process_tick(candle_start, slug, "UP", token_id, 0.99, 1.00)
+    # Price reaches $0.92 -> TP closes the position
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.92, 0.93)
     assert strat.active_position is None  # Trade closed!
 
     # 3. Subsequent tick in SAME candle at $0.85 -> MUST BE IGNORED!
@@ -130,8 +130,8 @@ def test_v4_startup_candle_cooldown(memory_db):
     Verify V4 strictly ignores mid-candle signals for the candle running during bot startup.
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
-    strat.boot_candle_sec = int(datetime.strptime("2026-08-05 00:00:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())  # Bot booted during this candle
-    candle_start = "2026-08-05 00:00:00"  # matches boot_candle_sec
+    strat.boot_candle_sec = int(datetime.strptime("2026-08-05 00:00:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+    candle_start = "2026-08-05 00:00:00"
     slug = "btc-updown-5m-1785830000"
     token_id = "TOK_UP_1"
 
@@ -141,9 +141,9 @@ def test_v4_startup_candle_cooldown(memory_db):
     assert strat.active_position is None
 
 
-def test_v4_tp_limit_placement_at_99(memory_db):
+def test_v4_tp_limit_placement_dynamic_offset(memory_db):
     """
-    Verify resting Limit Sell is configured at $0.99 upon fill.
+    Verify dynamic Take Profit target is placed at Entry + 7¢ (e.g., 84¢ -> 91¢).
     """
     strat = V4OddsStrategy(async_writer=None, notifier=None)
     strat.boot_candle_sec = 0
@@ -151,14 +151,14 @@ def test_v4_tp_limit_placement_at_99(memory_db):
     slug = "btc-updown-5m-1785830000"
     token_id = "TOK_UP_1"
 
-    # 1. Trigger Entry
+    # 1. Trigger Entry at 84¢
     strat.process_tick(candle_start, slug, "UP", token_id, 0.83, 0.84)
     assert strat.active_position is not None
 
-    # 2. Fill order at $0.84
+    # 2. Fill order at $0.84 -> TP must be 0.84 + 0.07 = 0.91 ($0.91)
     strat.process_tick(candle_start, slug, "UP", token_id, 0.84, 0.85)
     assert strat.active_position["Position_Status"] == "OPEN"
-    assert strat.active_position["Take_Profit_Price"] == 0.99
+    assert strat.active_position["Take_Profit_Price"] == 0.91
     assert strat.active_position["Stop_Loss_Price"] == 0.40
 
 
@@ -179,7 +179,6 @@ def test_v4_sl_trigger_at_40_cents(memory_db):
 
     # 2. Price drops to $0.40 -> STOP LOSS EXECUTES!
     strat.process_tick(candle_start, slug, "UP", token_id, 0.39, 0.40)
-    # Since dry run closes synchronously
     assert strat.active_position is None
 
 

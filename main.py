@@ -73,7 +73,7 @@ class PolymarketBotV4:
         logger.info(f"   Execution Mode : {config.execution_mode}")
         logger.info(f"   Database Path  : {self.db_path}")
         logger.info(f"   Entry Trigger  : Buy when UP/DOWN Ask >= ${config.v4_entry_odds_threshold:.2f} ({config.v4_entry_odds_threshold*100:.0f}¢)")
-        logger.info(f"   Take Profit    : Resting Limit Sell at ${config.v4_take_profit_price:.2f} ({config.v4_take_profit_price*100:.0f}¢)")
+        logger.info(f"   Take Profit    : Resting Limit Sell at Entry + ${config.v4_take_profit_offset_cents:.2f} (+${config.v4_take_profit_offset_cents*100:.0f}¢ offset) ({config.v4_take_profit_price*100:.0f}¢)")
         logger.info(f"   Stop Loss      : Limit Sell at Bid - ${config.v4_stop_loss_slippage_cents:.2f} when Bid <= ${config.v4_stop_loss_price:.2f} ({config.v4_stop_loss_price*100:.0f}¢)")
         logger.info(f"   Max Allocation : ${config.max_position_size_usd:.2f} USD per trade | Max Positions={config.max_active_positions}")
         logger.info("==================================================================")

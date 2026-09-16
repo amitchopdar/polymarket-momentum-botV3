@@ -1,6 +1,6 @@
 """
 Polymarket Bot V4: High-Odds Trend Following Strategy Engine
-(84¢-88¢ Entry Trigger, 99¢ Limit Take-Profit with Active Exchange Tracking, 40¢ Slippage-Protected Stop-Loss)
+(84¢-88¢ Entry Trigger, Dynamic +7¢ Take-Profit Target, 40¢ Slippage-Protected Stop-Loss)
 """
 
 import os
@@ -36,7 +36,8 @@ class V4OddsStrategy(IExecutionStrategy):
     1. Entry: Triggers BUY when UP or DOWN token odds are between 84¢ and 88¢ ($0.84 <= Ask <= $0.88).
        - Max 1 trade per 5m candle (never re-enters in the same candle after Take-Profit/Stop-Loss).
        - Skips entries during startup/boot candle to avoid entering stale mid-candle surges.
-    2. Take Profit: Resting Limit Sell order placed at 99 cents ($0.99) with active exchange status polling.
+    2. Take Profit: Dynamic resting Limit Sell placed at (Entry Price + 7¢), capped at 99¢.
+       - Actively polls Polymarket exchange REST API to instantly detect execution when matched.
     3. Stop Loss: Triggers when price drops <= 40 cents ($0.40).
        Executes Limit Sell at (current_bid - slippage) with dynamic 3.0s re-chasing loop.
     4. Fill Reconciliation & Zero-Balance Liquidation Guard.
@@ -217,7 +218,9 @@ class V4OddsStrategy(IExecutionStrategy):
 
         if size_matched > 0:
             fill_price = real_fill_price if (real_fill_price is not None and real_fill_price > 0) else limit_buy_price
-            take_profit_price = getattr(config, "v4_take_profit_price", 0.99)
+            tp_offset = getattr(config, "v4_take_profit_offset_cents", 0.07)
+            tp_cap = getattr(config, "v4_take_profit_price", 0.99)
+            take_profit_price = round(min(tp_cap, fill_price + tp_offset), 4)
             stop_loss_price = getattr(config, "v4_stop_loss_price", 0.40)
 
             pos["Average_Fill_Price"] = fill_price
@@ -279,7 +282,7 @@ class V4OddsStrategy(IExecutionStrategy):
                 self._evaluate_closing_position(current_bid, current_ask)
                 return
 
-            # Resting Take-Profit Limit Sell Order at $0.99
+            # Resting Take-Profit Limit Sell Order placed at Entry + Offset (e.g. 84¢ -> 91¢)
             prev_tp_qty = pos.get("Tp_Qty", 0.0)
             if self.live_strategy and self.live_strategy.clob_client and (not pos.get("Tp_Order_Id") or prev_tp_qty != size_matched):
                 if pos.get("Tp_Order_Id"):
@@ -288,6 +291,7 @@ class V4OddsStrategy(IExecutionStrategy):
                 if tp_resp and isinstance(tp_resp, dict) and ("orderID" in tp_resp or "orderId" in tp_resp):
                     pos["Tp_Order_Id"] = tp_resp.get("orderID") or tp_resp.get("orderId")
                     pos["Tp_Qty"] = size_matched
+                    logger.info(f"🎯 [V4 RESTING TP ORDER DISPATCHED] OrderID={pos['Tp_Order_Id']} Target Price=${take_profit_price:.4f} (+{tp_offset*100:.0f}¢) Qty={size_matched:.4f}")
 
         # 2. 5.0-Second Timeout Resolution & Exchange Reconciliation
         if elapsed_sec >= timeout_sec:
@@ -335,7 +339,9 @@ class V4OddsStrategy(IExecutionStrategy):
                         calc_qty = round(taking / 1000000.0, 4) if taking > 1000 else round(taking, 4)
                     final_fill_qty = calc_qty if calc_qty > 0 else target_qty
 
-                    take_profit_price = getattr(config, "v4_take_profit_price", 0.99)
+                    tp_offset = getattr(config, "v4_take_profit_offset_cents", 0.07)
+                    tp_cap = getattr(config, "v4_take_profit_price", 0.99)
+                    take_profit_price = round(min(tp_cap, final_fill_price + tp_offset), 4)
                     stop_loss_price = getattr(config, "v4_stop_loss_price", 0.40)
 
                     pos["Average_Fill_Price"] = final_fill_price
@@ -346,7 +352,7 @@ class V4OddsStrategy(IExecutionStrategy):
                     pos["Position_Status"] = "OPEN"
                     logger.info(
                         f"🎯 [V4 TIMEOUT RECONCILIATION] Order {buy_order_id} filled {final_fill_qty:.4f} shares at ${final_fill_price:.4f} on exchange! "
-                        f"Transitioning to OPEN position for live TP/SL tracking."
+                        f"Transitioning to OPEN position (TP: ${take_profit_price:.4f} | SL: ${stop_loss_price:.4f})."
                     )
                     if not pos.get("Entry_Notified"):
                         pos["Entry_Notified"] = True
@@ -565,7 +571,7 @@ class V4OddsStrategy(IExecutionStrategy):
         pos["High_Water_Mark"] = hwm
 
         # 1. Active Resting Take-Profit Exchange Status Polling
-        # Real-time exchange verification: check if Polymarket matched our resting 99¢ Limit Sell
+        # Real-time exchange verification: check if Polymarket matched our resting Limit Sell TP
         if self.live_strategy and self.live_strategy.clob_client and pos.get("Tp_Order_Id") and not str(pos["Tp_Order_Id"]).startswith("V4_"):
             last_tp_poll = pos.get("_last_tp_poll_sec", 0.0)
             if (now_ts - last_tp_poll) >= 1.5:
@@ -603,7 +609,7 @@ class V4OddsStrategy(IExecutionStrategy):
                         self._evaluate_closing_position(current_bid, current_ask)
                         return pos
 
-        # 2. Persistent TP limit order retry at $0.99
+        # 2. Persistent TP limit order retry at Target TP Price
         prev_tp_qty = pos.get("Tp_Qty", 0.0)
         if self.live_strategy and self.live_strategy.clob_client and (not pos.get("Tp_Order_Id") or prev_tp_qty != filled_qty) and filled_qty > 0:
             if pos.get("Tp_Order_Id"):
@@ -612,7 +618,7 @@ class V4OddsStrategy(IExecutionStrategy):
             if tp_resp and isinstance(tp_resp, dict) and ("orderID" in tp_resp or "orderId" in tp_resp):
                 pos["Tp_Order_Id"] = tp_resp.get("orderID") or tp_resp.get("orderId")
                 pos["Tp_Qty"] = filled_qty
-                logger.info(f"🎯 [V4 PERSISTENT TP RETRY SUCCESS] OrderID={pos['Tp_Order_Id']} placed for {filled_qty:.4f} shares.")
+                logger.info(f"🎯 [V4 PERSISTENT TP RETRY SUCCESS] OrderID={pos['Tp_Order_Id']} Target Price=${tp_price:.4f} placed for {filled_qty:.4f} shares.")
 
         is_tp_trigger = current_bid >= tp_price
         is_sl_trigger = current_bid <= sl_price
@@ -839,6 +845,10 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
             now_ts = time.time()
             now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+            tp_offset = getattr(config, "v4_take_profit_offset_cents", 0.07)
+            tp_cap = getattr(config, "v4_take_profit_price", 0.99)
+            take_profit_price = round(min(tp_cap, limit_buy_price + tp_offset), 4)
+
             pos = {
                 "Candle_Start": candle_start,
                 "Slug": slug,
@@ -851,7 +861,7 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
                 "Average_Fill_Price": limit_buy_price,
                 "Target_Quantity": target_qty,
                 "Filled_Quantity": 0.0,
-                "Take_Profit_Price": getattr(config, "v4_take_profit_price", 0.99),
+                "Take_Profit_Price": take_profit_price,
                 "Stop_Loss_Price": getattr(config, "v4_stop_loss_price", 0.40),
                 "High_Water_Mark": limit_buy_price,
                 "Entry_Timestamp": now_dt,
@@ -864,7 +874,7 @@ class V4LiveExecutionStrategy(IExecutionStrategy):
                 "Updated_At": now_dt
             }
 
-            logger.info(f"🎯 [V4 LIVE CLOB ORDER PLACED 200 OK] OrderID={order_id} | Side={side} | Price=${limit_buy_price:.4f} | Qty={target_qty}")
+            logger.info(f"🎯 [V4 LIVE CLOB ORDER PLACED 200 OK] OrderID={order_id} | Side={side} | Price=${limit_buy_price:.4f} | Target TP=${take_profit_price:.4f} | Qty={target_qty}")
             return pos
         except Exception as e:
             logger.error(f"Failed to post V4 Live CLOB Order: {e}")
