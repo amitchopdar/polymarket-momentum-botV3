@@ -521,6 +521,23 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     pre_pos["Order_Timestamp_Sec"] = now_sec
                     pre_pos["Target_Buy_Price"] = limit_buy_price
                     pre_pos["Target_Quantity"] = target_qty
+
+                    if self.async_writer:
+                        sql = """
+                            INSERT INTO Positions (
+                                Candle_Start, Slug, Token_Id, Position_Side, Entry_Timestamp,
+                                Trigger_Odds_10s_Ago, Entry_Odds, Target_Buy_Price, Target_Quantity,
+                                Filled_Quantity, Sell_Quantity, Buy_Order_Id, Position_Status, Pnl, Updated_At
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """
+                        self.async_writer.enqueue_write(
+                            sql,
+                            (
+                                candle_start, slug, token_id, side, now_dt,
+                                min_ask_10s, current_ask, limit_buy_price, target_qty,
+                                0.0, 0.0, pre_pos.get("Buy_Order_Id"), "PENDING_FILL", 0.0, now_dt
+                            )
+                        )
                 else:
                     self.active_position = None
                 return pre_pos
@@ -781,9 +798,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         if size_matched > 0:
             fill_price = real_fill_price if (real_fill_price is not None and real_fill_price > 0) else limit_buy_price
-            high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
+            high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.80)
             high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
-            tp_cents = getattr(config, "v2_take_profit_cents", 0.05)
+            tp_cents = getattr(config, "v2_take_profit_cents", 0.20)
             trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
 
             hwm = max(fill_price, peak_price)
@@ -797,6 +814,24 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             pos["Stop_Loss_Price"] = stop_loss_price
             pos["High_Water_Mark"] = hwm
             pos["Position_Status"] = "OPEN"
+            pos["Updated_At"] = now_dt
+
+            if self.async_writer:
+                sql = """
+                    UPDATE Positions SET
+                        Average_Fill_Price = ?,
+                        Filled_Quantity = ?,
+                        Take_Profit_Price = ?,
+                        Stop_Loss_Price = ?,
+                        High_Water_Mark = ?,
+                        Position_Status = 'OPEN',
+                        Updated_At = ?
+                    WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'PENDING_FILL');
+                """
+                self.async_writer.enqueue_write(
+                    sql,
+                    (fill_price, size_matched, take_profit_price, stop_loss_price, hwm, now_dt, buy_order_id, candle_start)
+                )
 
             if not pos.get("Entry_Notified"):
                 pos["Entry_Notified"] = True
@@ -846,12 +881,22 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 pos["Exit_Timestamp"] = now_dt
                 pos["Sell_Order_Id"] = sell_order_id
                 pos["Exit_Quantity"] = size_matched
-                pos["Pnl"] = -0.50
+                entry_p = pos.get("Average_Fill_Price") or limit_buy_price
+                pos["Pnl"] = round((limit_sell_price - entry_p) * size_matched, 4)
                 pos["Updated_At"] = now_dt
 
                 if self.async_writer:
-                    sql = "UPDATE Positions SET Position_Status = 'CLOSING', Exit_Reason = 'STOP_LOSS', Exit_Price = ?, Updated_At = ? WHERE Buy_Order_Id = ?;"
-                    self.async_writer.enqueue_write(sql, (stop_loss_price, now_dt, buy_order_id))
+                    sql = """
+                        UPDATE Positions SET
+                            Position_Status = 'CLOSING',
+                            Exit_Reason = 'STOP_LOSS',
+                            Exit_Price = ?,
+                            Sell_Order_Id = ?,
+                            Pnl = ?,
+                            Updated_At = ?
+                        WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('PENDING_FILL', 'OPEN'));
+                    """
+                    self.async_writer.enqueue_write(sql, (limit_sell_price, sell_order_id, pos["Pnl"], now_dt, buy_order_id, candle_start))
 
                 self._evaluate_closing_position(current_bid, current_ask)
                 return
@@ -1038,9 +1083,18 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
                     real_price = 0.0
                     if making > 0 and taking > 0:
-                        real_price = round(taking / making, 4)
+                        r1, r2 = making / taking, taking / making
+                        if 0.01 <= r1 <= 1.00:
+                            real_price = round(r1, 4)
+                        elif 0.01 <= r2 <= 1.00:
+                            real_price = round(r2, 4)
                     elif order_info.get("price"):
-                        real_price = float(order_info["price"])
+                        try:
+                            p_val = float(order_info["price"])
+                            if 0.01 <= p_val <= 1.00:
+                                real_price = p_val
+                        except Exception:
+                            pass
 
                     if real_price > 0:
                         pos["Exit_Price"] = real_price
@@ -1115,9 +1169,16 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         if is_filled:
             pos["Position_Status"] = "CLOSED"
-            exit_price = pos.get("Exit_Price", 0.0)
+            exit_price = pos.get("Exit_Price") or pos.get("Sell_Limit_Price") or pos.get("Stop_Loss_Price", 0.0)
             exit_reason = pos.get("Exit_Reason", "STOP_LOSS")
             trade_outcome = pos.get("Trade_Outcome", "STOP_LOSS_HIT")
+            entry_p = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price", 0.0)
+            
+            if entry_p > 0 and exit_price > 0 and exit_qty > 0:
+                calc_pnl = round((exit_price - entry_p) * exit_qty, 4)
+                pos["Pnl"] = calc_pnl
+                pos["Trade_Outcome"] = "WIN" if exit_price >= entry_p else "LOSS"
+
             pnl = pos.get("Pnl", 0.0)
 
             if self.async_writer:
@@ -1134,12 +1195,12 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                         Position_Status = 'CLOSED',
                         Pnl = ?,
                         Updated_At = ?
-                    WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'CLOSING', 'PARTIALLY_CLOSED'));
+                    WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'CLOSING', 'PARTIALLY_CLOSED', 'PENDING_FILL'));
                 """
                 self.async_writer.enqueue_write(
                     sql,
                     (
-                        now_dt, exit_price, exit_reason, trade_outcome,
+                        now_dt, exit_price, exit_reason, pos.get("Trade_Outcome", trade_outcome),
                         sell_order_id, exit_qty, pos.get("High_Water_Mark", 0.0),
                         pos.get("Stop_Loss_Price", 0.0), pnl, now_dt, pos.get("Buy_Order_Id"), candle_start
                     )
@@ -1152,7 +1213,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
             if hasattr(self, "notifier") and self.notifier:
                 try:
-                    entry_p = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price", 0.0)
                     self.notifier.notify_v2_trade_exit(
                         candle_start,
                         pos.get('Position_Side') or pos.get('Prediction_Side', 'UP'),
@@ -1284,10 +1344,31 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             pos["Position_Status"] = "CLOSING"
             pos["Updated_At"] = now_dt
 
-            taker_fee_pct = getattr(config, "v2_taker_fee_pct", 0.02)
+            taker_fee_pct = getattr(config, "v2_taker_fee_pct", 0.00)
             taker_fee_cost = round(exit_price * taker_fee_pct * exit_qty, 4)
             pnl = round((exit_price - entry_price) * exit_qty - taker_fee_cost, 4)
             pos["Pnl"] = pnl
+
+            if self.async_writer:
+                sql = """
+                    UPDATE Positions SET
+                        Position_Status = 'CLOSING',
+                        Exit_Price = ?,
+                        Exit_Reason = ?,
+                        Trade_Outcome = ?,
+                        Sell_Order_Id = ?,
+                        Sell_Quantity = ?,
+                        Pnl = ?,
+                        Updated_At = ?
+                    WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('PENDING_FILL', 'OPEN'));
+                """
+                self.async_writer.enqueue_write(
+                    sql,
+                    (
+                        exit_price, exit_reason, trade_outcome, sell_order_id,
+                        new_sell_qty, pnl, now_dt, pos.get("Buy_Order_Id"), candle_start
+                    )
+                )
 
             self._evaluate_closing_position(current_bid, current_ask)
             return pos
@@ -1362,6 +1443,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
 
     def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None):
         self.notifier = notifier
+        self.async_writer = async_writer
         self.dry_strategy = V2OddsMomentumStrategy(async_writer, notifier=notifier, live_strategy=self)
         self.clob_client = None
         self._init_clob_client()

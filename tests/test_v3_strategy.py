@@ -284,4 +284,110 @@ def test_v3_timeout_fill_reconciliation(memory_db):
     assert pos["Average_Fill_Price"] == 0.7500
 
 
+def test_v3_db_persistence_and_telegram_pnl_summary(tmp_path):
+    import sqlite3
+    from unittest.mock import MagicMock
+    from src.database.connection import PolyDBManager, AsyncDBWriter
+    from src.execution.strategy import LiveExecutionStrategy
+    from src.notifications.telegram_bot import TelegramCommandRouter
+    from src.notifications.notifier import TelegramNotifier
+
+    db_path = str(tmp_path / "test_pnl.sqlite")
+    db_mgr = PolyDBManager(db_path=db_path)
+    async_writer = AsyncDBWriter(db_mgr)
+    async_writer.start()
+
+    notifier = MagicMock()
+    strat = LiveExecutionStrategy(async_writer=async_writer, notifier=notifier)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-08-05 00:40:00"
+    slug = "btc-updown-5m-1785832400"
+    token_id = "TOK_PNL_TEST"
+
+    # 1. Simulate entry trigger in LIVE mode
+    mock_clob.create_order.return_value = {"signed": True}
+    mock_clob.post_order.return_value = {"orderID": "0xBUY_LIVE_123"}
+
+    # Push historical ticks to generate momentum jump
+    for i in range(12):
+        strat.dry_strategy.process_tick(candle_start, slug, "UP", token_id, 0.50, 0.50)
+    # Jump to 0.70 (20c jump)
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.69, 0.70)
+
+    # Allow async writer to flush
+    time.sleep(0.3)
+
+    # Verify PENDING_FILL was inserted into DB
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT Buy_Order_Id, Position_Status, Target_Buy_Price FROM Positions WHERE Buy_Order_Id = '0xBUY_LIVE_123';")
+    row = c.fetchone()
+    assert row is not None
+    assert row[0] == "0xBUY_LIVE_123"
+    assert row[1] == "PENDING_FILL"
+    conn.close()
+
+    # 2. Simulate Order Fill on exchange
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "5.0",
+        "makingAmount": "3.40",
+        "takingAmount": "5.0",
+        "price": "0.6800"
+    }
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.67, 0.68)
+    time.sleep(0.3)
+
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT Position_Status, Average_Fill_Price, Filled_Quantity FROM Positions WHERE Buy_Order_Id = '0xBUY_LIVE_123';")
+    row = c.fetchone()
+    assert row is not None
+    assert row[0] == "OPEN"
+    assert row[1] == 0.6800
+    assert row[2] == 5.0
+    conn.close()
+
+    # 3. Simulate Stop Loss Trigger & Exit Fill (Loss: Entry $0.68 -> Exit $0.58)
+    mock_clob.post_order.return_value = {"orderID": "0xSELL_SL_123"}
+    # Exchange confirms sell fill at $0.56
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "5.0",
+        "makingAmount": "5.0",
+        "takingAmount": "2.80", # Real exit price = 2.80 / 5.0 = 0.56
+    }
+    # Price crashes to $0.55 <= SL $0.58
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.55, 0.56)
+    time.sleep(0.3)
+
+    # Check DB for CLOSED position and negative PnL
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT Position_Status, Exit_Price, Pnl, Trade_Outcome FROM Positions WHERE Buy_Order_Id = '0xBUY_LIVE_123';")
+    row = c.fetchone()
+    assert row is not None
+    assert row[0] == "CLOSED"
+    assert row[1] == 0.56
+    # PnL = (0.56 - 0.68) * 5.0 = -0.60
+    assert round(row[2], 2) == -0.60
+    assert row[3] == "LOSS"
+    conn.close()
+
+    # 4. Verify Telegram PnL Summary
+    router = TelegramCommandRouter(notifier, db_path=db_path)
+    summary = router._calculate_pnl_summary()
+    assert summary["total"] == 1
+    assert summary["closed"] == 1
+    assert summary["wins"] == 0
+    assert summary["losses"] == 1
+    assert summary["win_rate"] == 0.0
+    assert round(summary["total_pnl"], 2) == -0.60
+
+    async_writer.stop()
+
+
+
 
