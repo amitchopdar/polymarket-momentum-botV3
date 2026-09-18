@@ -57,18 +57,18 @@ def test_v2_momentum_trigger_and_tp_sl_calculation(memory_db):
     # 1. Feed tick 10 seconds ago at $0.50
     strat.tick_buffers[token_id] = [(now_sec - 10.0, 0.49, 0.50)]
 
-    # 2. Feed tick now at $0.66 (+0.16 shift >= +0.15 AND $0.66 >= $0.65) -> Places PENDING_FILL at Limit $0.64
+    # 2. Feed tick now at $0.66 (+0.16 shift >= +0.15 AND $0.66 >= $0.65) -> Places PENDING_FILL at Limit $0.67 (Ask $0.66 + $0.01)
     pos = strat.process_tick(candle_start, slug, "UP", token_id, 0.65, 0.66)
     assert pos is not None
     assert pos["Position_Status"] == "PENDING_FILL"
 
-    # 3. Seller hits $0.64 bid -> Fills position to OPEN
-    strat.process_tick(candle_start, slug, "UP", token_id, 0.64, 0.65)
+    # 3. Market tick fills at Ask $0.66 (<= $0.67 Limit Buy) -> Fills position to OPEN
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.65, 0.66)
     pos = strat.active_position
     assert pos["Position_Status"] == "OPEN"
-    assert pos["Average_Fill_Price"] == 0.64
-    assert pos["Take_Profit_Price"] == round(0.64 + getattr(config, "v2_take_profit_cents", 0.05), 4)
-    assert pos["Stop_Loss_Price"] == 0.55
+    assert pos["Average_Fill_Price"] == 0.66
+    assert pos["Take_Profit_Price"] == round(0.66 + getattr(config, "v2_take_profit_cents", 0.20), 4)
+    assert pos["Stop_Loss_Price"] == 0.56
     assert strat.active_position is not None
 
 def test_v2_high_odds_tp_target(memory_db):
@@ -82,17 +82,17 @@ def test_v2_high_odds_tp_target(memory_db):
     # Tick 10s ago at $0.64
     strat.tick_buffers[token_id] = [(now_sec - 10.0, 0.63, 0.64)]
 
-    # Tick now at $0.82 (+0.18 shift >= +0.15) -> Places PENDING_FILL at Limit $0.80 (>= $0.80 cutoff)
+    # Tick now at $0.82 (+0.18 shift >= +0.15) -> Places PENDING_FILL at Limit $0.83 (>= $0.80 cutoff)
     pos = strat.process_tick(candle_start, slug, "UP", token_id, 0.81, 0.82)
     assert pos is not None
 
-    # Seller hits $0.80 bid -> Fills position to OPEN
-    strat.process_tick(candle_start, slug, "UP", token_id, 0.80, 0.81)
+    # Market tick fills at Ask $0.82 -> Fills position to OPEN
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.81, 0.82)
     pos = strat.active_position
 
     assert pos["Entry_Odds"] == 0.82
     assert pos["Take_Profit_Price"] == 0.99  # Fixed $0.99 max exchange limit target for entry >= $0.80 cutoff
-    assert pos["Stop_Loss_Price"] == 0.71  # Initial SL from peak HWM = $0.81
+    assert pos["Stop_Loss_Price"] == 0.72  # Initial SL from peak HWM ($0.82 - 0.10 = 0.72)
 
 def test_v2_single_position_guard(memory_db):
     strat = V2OddsMomentumStrategy(async_writer=None)

@@ -28,7 +28,7 @@ def test_v3_maker_offset_placement(memory_db):
     assert pos["Position_Status"] == "PENDING_FILL"
     assert pos["Entry_Odds"] == 0.70
     assert pos["Position_Side"] == "UP"
-    assert pos["Target_Buy_Price"] == round(0.70 - 0.02, 4)  # $0.68 Limit Buy ($0.70 Ask - $0.02 Offset)
+    assert pos["Target_Buy_Price"] == round(0.70 + 0.01, 4)  # $0.71 Limit Buy ($0.70 Ask + $0.01 Buffer)
     assert pos["Filled_Quantity"] == 0.0
     assert strat.active_position is not None
 
@@ -41,19 +41,19 @@ def test_v3_successful_maker_fill(memory_db):
     now_sec = time.time()
     strat.tick_buffers[token_id] = [(now_sec - 10.0, 0.49, 0.50)]
 
-    # 1. Place Limit Buy at Ask $0.70 -> Limit Buy Price = $0.68
+    # 1. Place Limit Buy at Ask $0.70 -> Limit Buy Price = $0.71
     pos = strat.process_tick(candle_start, slug, "UP", token_id, 0.69, 0.70)
     assert pos["Position_Status"] == "PENDING_FILL"
 
-    # 2. Market price dips to touch $0.68 bid (bid = $0.68, ask = $0.68)
-    strat.process_tick(candle_start, slug, "UP", token_id, 0.68, 0.68)
+    # 2. Immediate fill at Ask $0.70 (effective price $0.70 <= $0.71 Limit Price)
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.69, 0.70)
 
-    # 3. Position fills at $0.68 and transitions to OPEN
+    # 3. Position fills at $0.70 and transitions to OPEN
     assert strat.active_position is not None
     assert strat.active_position["Position_Status"] == "OPEN"
-    assert strat.active_position["Average_Fill_Price"] == 0.68
-    assert strat.active_position["Take_Profit_Price"] == round(0.68 + getattr(config, "v2_take_profit_cents", 0.05), 4)
-    assert strat.active_position["Stop_Loss_Price"] == 0.58    # HWM = $0.68 -> SL = $0.58 ($0.68 - 0.10)
+    assert strat.active_position["Average_Fill_Price"] == 0.70
+    assert strat.active_position["Take_Profit_Price"] == round(0.70 + getattr(config, "v2_take_profit_cents", 0.20), 4)
+    assert strat.active_position["Stop_Loss_Price"] == 0.60    # HWM = $0.70 -> SL = $0.60 ($0.70 - 0.10)
 
 def test_v3_order_timeout_cancellation(memory_db):
     strat = V2OddsMomentumStrategy(async_writer=None)

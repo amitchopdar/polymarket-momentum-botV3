@@ -195,7 +195,7 @@ class TelegramCommandRouter:
             f"• <b>Execution Mode:</b> <code>{config.execution_mode}</code>\n"
             f"• <b>Momentum Trigger:</b> <code>+${config.v2_momentum_threshold_cents:.2f} in {config.v2_momentum_window_sec:.0f}s</code>\n"
             f"• <b>Odds Entry Range:</b> <code>${config.v2_min_entry_odds_floor:.2f} – ${config.v2_max_entry_odds_ceiling:.2f}</code>\n"
-            f"• <b>Maker Limit Offset:</b> <code>-${config.v3_maker_offset_cents:.2f} (0% Maker Fee)</code>\n"
+            f"• <b>Buy Slippage Buffer:</b> <code>+${config.v3_buy_slippage_cents:.2f} (Instant Fill)</code>\n"
             f"• <b>Take Profit Target:</b> <code>+${config.v2_take_profit_cents:.2f}</code>\n"
             f"• <b>Trailing Stop Loss:</b> <code>-${config.v2_trailing_sl_distance_cents:.2f} (from Peak)</code>\n"
             f"• <b>Max Position Size:</b> <code>${config.max_position_size_usd:.2f}</code>\n"

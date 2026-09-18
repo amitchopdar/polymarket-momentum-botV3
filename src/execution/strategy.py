@@ -536,8 +536,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 pass
 
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
-            maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
-            limit_buy_price = round(max(0.01, current_ask - maker_offset), 4)
+            buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
+            limit_buy_price = round(min(0.9900, max(0.01, current_ask + buy_slippage)), 4)
             pos_size_usd = getattr(config, "max_position_size_usd", 5.0)
             raw_qty = round(pos_size_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
             target_qty = max(5.0, raw_qty)
@@ -735,9 +735,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         now_ts = time.time()
         now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
-        # Limit Buy Price is placed below Best Ask for Maker status
-        limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
+        buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
+        # Limit Buy Price is placed with slippage buffer above Best Ask for instant marketable execution
+        limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
 
         target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
         buy_order_id = f"V3_MAKER_{int(now_ts*1000)}"
@@ -794,7 +794,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         logger.info(
             f"📥 [V3 MAKER ORDER PLACED] Side={side} | Candle={candle_start} | "
-            f"Best_Ask=${entry_odds:.4f} -> Limit_Buy=${limit_buy_price:.4f} (-{maker_offset*100:.0f}¢ Maker Offset) | Status=PENDING_FILL (5s Timeout)"
+            f"Best_Ask=${entry_odds:.4f} -> Limit_Buy=${limit_buy_price:.4f} (+{buy_slippage*100:.0f}¢ Buffer) | Status=PENDING_FILL (5s Timeout)"
         )
 
         return pos
@@ -823,7 +823,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         buy_order_id = pos.get("Buy_Order_Id")
         timeout_sec = getattr(config, "v3_maker_order_timeout_sec", 5.0)
 
-        eff_price = current_bid if (current_bid is not None and current_bid > 0) else current_ask
+        eff_price = current_ask if (current_ask is not None and current_ask > 0) else current_bid
         peak_price = max(current_bid or 0.0, current_ask or 0.0)
 
         # 1. FETCH EXACT FILLED QUANTITY & REAL FILL PRICE DIRECTLY FROM POLYMARKET EXCHANGE
@@ -864,7 +864,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 size_matched = target_qty
 
         if size_matched > 0:
-            fill_price = real_fill_price if (real_fill_price is not None and real_fill_price > 0) else limit_buy_price
+            fill_price = real_fill_price if (real_fill_price is not None and real_fill_price > 0) else (eff_price if (eff_price is not None and eff_price > 0) else limit_buy_price)
             high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.80)
             high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
             tp_cents = getattr(config, "v2_take_profit_cents", 0.20)
@@ -1664,13 +1664,13 @@ class LiveExecutionStrategy(IExecutionStrategy):
             except ImportError:
                 from py_clob_client.clob_types import OrderArgs, OrderType
 
-            maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
+            buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
             entry_odds = current_ask or target_price
-            limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
+            limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
             raw_qty = round(spend_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
             target_qty = max(5.0, raw_qty)
 
-            logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Post-Only Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} Qty={target_qty}")
+            logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} (Ask + ${buy_slippage:.2f}) Qty={target_qty}")
             order_args = OrderArgs(
                 price=limit_buy_price,
                 size=target_qty,

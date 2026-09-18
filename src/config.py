@@ -80,7 +80,8 @@ USER_V2_MAX_POSITION_SIZE_USD = 5.0       # Max position size per trade ($5.00)
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
-USER_V3_MAKER_OFFSET_CENTS = 0.02         # 2 cents below best ask for Maker status (0.01 or 0.02)
+USER_V3_BUY_SLIPPAGE_CENTS = 0.01          # 1 cent (+0.01) buffer above ask for instant marketable limit buy fill
+USER_V3_MAKER_OFFSET_CENTS = 0.01         # Alias for buy offset
 USER_V3_MAKER_ORDER_TIMEOUT_SEC = 5.0     # 5 seconds order cancellation timeout
 # ==============================================================================
 
@@ -136,8 +137,9 @@ class AppConfig:
     max_position_size_usd: float = field(default_factory=lambda: _safe_float(os.getenv("MAX_POSITION_SIZE_USD"), USER_V2_MAX_POSITION_SIZE_USD))
     max_active_positions: int = field(default_factory=lambda: _safe_int(os.getenv("MAX_ACTIVE_POSITIONS"), USER_V2_MAX_ACTIVE_POSITIONS))
 
-    # V3 Maker Configuration
-    v3_maker_offset_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_MAKER_OFFSET_CENTS"), USER_V3_MAKER_OFFSET_CENTS))
+    # V3 Execution Configuration
+    v3_buy_slippage_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_BUY_SLIPPAGE_CENTS") or os.getenv("V3_MAKER_OFFSET_CENTS"), USER_V3_BUY_SLIPPAGE_CENTS))
+    v3_maker_offset_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_BUY_SLIPPAGE_CENTS") or os.getenv("V3_MAKER_OFFSET_CENTS"), USER_V3_MAKER_OFFSET_CENTS))
     v3_maker_order_timeout_sec: float = field(default_factory=lambda: _safe_float(os.getenv("V3_MAKER_ORDER_TIMEOUT_SEC"), USER_V3_MAKER_ORDER_TIMEOUT_SEC))
 
     # Risk Engine Guardrails
