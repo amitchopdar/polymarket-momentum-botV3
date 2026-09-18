@@ -34,7 +34,8 @@ class IExecutionStrategy(ABC):
         position_usd: float,
         token_id: str,
         current_bid: Optional[float] = None,
-        current_ask: Optional[float] = None
+        current_ask: Optional[float] = None,
+        opposite_token_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         pass
 
@@ -83,7 +84,8 @@ class DryExecutionStrategy(IExecutionStrategy):
         position_usd: float,
         token_id: str,
         current_bid: Optional[float] = None,
-        current_ask: Optional[float] = None
+        current_ask: Optional[float] = None,
+        opposite_token_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Dispatches a persistent limit buy order at target_price ($0.40).
@@ -440,7 +442,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             self._evaluate_pending_fill(current_bid, current_ask)
 
         # 1.5 Evaluate active PENDING_HEDGE position for fill or 2s timeout
-        if self.active_position and self.active_position.get("Position_Status") == "PENDING_HEDGE":
+        if self.active_position and self.active_position.get("Position_Status") == "PENDING_HEDGE" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_pending_hedge(current_bid, current_ask)
 
         # 2. Evaluate active CLOSING position for sell fill confirmation on exchange
@@ -485,7 +487,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
-            limit_buy_price = round(min(0.9900, max(0.01, current_ask + buy_slippage)), 4)
+            limit_buy_price = round(min(0.99, max(0.01, current_ask + buy_slippage)), 2)
             trade_shares = getattr(config, "trade_size_shares", 7.0)
             target_qty = max(5.0, round(float(trade_shares), 2))
             now_sec = time.time()
@@ -520,7 +522,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     position_usd=round(target_qty * limit_buy_price, 4),
                     token_id=token_id,
                     current_bid=current_bid,
-                    current_ask=current_ask
+                    current_ask=current_ask,
+                    opposite_token_id=opposite_token_id
                 )
                 if pos:
                     pre_pos.update(pos)
@@ -547,6 +550,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                         )
                 else:
                     self.active_position = None
+                    return None
                 return pre_pos
             return self.execute_entry_v3(
                 candle_start=candle_start,
@@ -687,7 +691,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
         # Limit Buy Price is placed with slippage buffer above Best Ask for instant marketable execution
-        limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
+        limit_buy_price = round(min(0.99, max(0.01, entry_odds + buy_slippage)), 2)
 
         trade_shares = getattr(config, "trade_size_shares", 7.0)
         target_qty = max(5.0, round(float(trade_shares), 2))
@@ -878,6 +882,10 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     self.cancel_order_on_exchange(buy_order_id)
                 if pos.get("Tp_Order_Id"):
                     self.cancel_order_on_exchange(pos["Tp_Order_Id"])
+
+                sl_mode = getattr(config, "stop_loss_mode", "SYNTHETIC_HEDGE")
+                if sl_mode == "SYNTHETIC_HEDGE" and pos.get("Opposite_Token_Id"):
+                    return self.execute_synthetic_hedge_exit(pos, current_bid, current_ask)
 
                 slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.02)
                 effective_bid = current_bid if (current_bid is not None and current_bid > 0) else eff_price
@@ -1456,8 +1464,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         filled_qty = pos.get("Filled_Quantity") or pos.get("Target_Quantity") or 7.0
         slippage_buffer = getattr(config, "v3_hedge_slippage_cents", getattr(config, "v3_buy_slippage_cents", 0.01))
 
-        # Target hedge buy price on opposite token: 1.00 - SL_Price + Slippage
-        hedge_limit_buy = round(min(0.9900, max(0.01, (1.0000 - sl_price) + slippage_buffer)), 4)
+        # Target hedge buy price on opposite token: 1.00 - SL_Price + Slippage (2 decimal precision for 0.01 tick size)
+        hedge_limit_buy = round(min(0.99, max(0.01, (1.00 - sl_price) + slippage_buffer)), 2)
         hedge_qty = filled_qty
         hedge_order_id = f"HEDGE_{int(now_ts*1000)}"
         hedge_fill_price = round(1.0000 - sl_price, 4)
@@ -1478,7 +1486,11 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         # In Live Mode: Dispatch Buy Order on CLOB for Opposite Token
         try:
             try:
-                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
+                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType, BalanceAllowanceParams, AssetType
+                try:
+                    self.live_strategy.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+                except Exception:
+                    pass
             except ImportError:
                 from py_clob_client.clob_types import OrderArgs, OrderType
 
@@ -1737,13 +1749,19 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
     def _close_expired_position(self, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Closes active position from previous candle on 5m boundary rollover and unlocks single position guard.
-        Validates if SL or TP was breached during the candle before defaulting to CANDLE_EXPIRED.
+        Handoffs hedged and filled open positions cleanly to Settlement Tracker to resolve on Gamma API,
+        cancelling any resting order to eliminate deadlocks across candles.
         """
         pos = self.active_position
         if not pos:
             return None
 
+        now_ts = time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         status = pos.get("Position_Status")
+        buy_order_id = pos.get("Buy_Order_Id")
+
+        # 1. HEDGED_LOCKED: Hand off to Settlement Tracker
         if status == "HEDGED_LOCKED":
             logger.info(f"⌛ [CANDLE ROLLOVER] Handing off HEDGED_LOCKED position ({pos.get('Slug')}) to Settlement Tracker.")
             if self.settlement_tracker:
@@ -1751,33 +1769,33 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             self.active_position = None
             return pos
 
-        now_ts = time.time()
-        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        entry_price = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price") or 0.0
-        filled_qty = pos.get("Filled_Quantity") or pos.get("Target_Quantity") or 0.0
-        prev_sell_qty = pos.get("Sell_Quantity", 0.0)
-        exit_qty = filled_qty - prev_sell_qty
-        if exit_qty <= 0:
-            exit_qty = filled_qty
+        # 2. Cancel any resting TP or SL sell order on exchange
+        if pos.get("Tp_Order_Id"):
+            self.cancel_order_on_exchange(pos["Tp_Order_Id"])
+            pos["Tp_Order_Id"] = None
+        if pos.get("Sell_Order_Id") and not str(pos.get("Sell_Order_Id")).startswith("V3_"):
+            self.cancel_order_on_exchange(pos["Sell_Order_Id"])
 
-        new_sell_qty = round(prev_sell_qty + exit_qty, 4)
-        buy_order_id = pos.get("Buy_Order_Id")
+        filled_qty = float(pos.get("Filled_Quantity") or 0.0)
+
+        # In live mode: Query exchange for fill status if still marked PENDING_FILL
         if self.live_strategy and self.live_strategy.clob_client and buy_order_id and not str(buy_order_id).startswith("V3_"):
             order_info = self.live_strategy.get_order_from_exchange(buy_order_id)
             if order_info and isinstance(order_info, dict):
                 size_matched = round(float(order_info.get("size_matched") or order_info.get("sizeMatched") or 0.0), 4)
                 if size_matched > 0:
-                    pos["Filled_Quantity"] = size_matched
-                    if pos.get("Position_Status") in ("PENDING_FILL", "OPEN", "CLOSING"):
-                        if pos.get("Position_Status") == "PENDING_FILL":
-                            pos["Position_Status"] = "OPEN"
-                        logger.info(
-                            f"ℹ [CANDLE ROLLOVER RECONCILIATION] Position {buy_order_id} has {size_matched:.4f} filled shares. "
-                            f"Continuing live TP/SL tracking across candle boundary."
-                        )
-                        return pos
+                    filled_qty = max(filled_qty, size_matched)
+                    pos["Filled_Quantity"] = filled_qty
 
-        # If 0 shares filled at rollover, cancel buy order on exchange and unlock guard
+        # 3. If shares were filled during candle: Contract expired, hand off to Settlement Tracker
+        if filled_qty > 0 or status in ("OPEN", "CLOSING"):
+            logger.info(f"⌛ [CANDLE ROLLOVER SETTLEMENT] Position ({pos.get('Slug')}) held {filled_qty:.4f} shares at candle boundary. Handing off to Settlement Tracker.")
+            if self.settlement_tracker:
+                self.settlement_tracker.enqueue_settlement(pos)
+            self.active_position = None
+            return pos
+
+        # 4. If 0 shares filled at rollover: Cancel buy order on exchange and unlock guard
         if buy_order_id:
             self.cancel_order_on_exchange(buy_order_id)
         pos["Position_Status"] = "CANCELLED"
@@ -1788,8 +1806,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             self.async_writer.enqueue_write(sql, (now_dt, buy_order_id))
         self.active_position = None
         return None
-
-        return pos
 
     def execute_entry(self, *args, **kwargs) -> Optional[Dict[str, Any]]:
         return None
@@ -1808,10 +1824,11 @@ class LiveExecutionStrategy(IExecutionStrategy):
     In simulation/dry-run fallback, delegates safely to DryExecutionStrategy.
     """
 
-    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None):
+    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None, settlement_tracker: Optional[Any] = None):
         self.notifier = notifier
         self.async_writer = async_writer
-        self.dry_strategy = V2OddsMomentumStrategy(async_writer, notifier=notifier, live_strategy=self)
+        self.settlement_tracker = settlement_tracker
+        self.dry_strategy = V2OddsMomentumStrategy(async_writer, notifier=notifier, live_strategy=self, settlement_tracker=settlement_tracker)
         self.clob_client = None
         self._init_clob_client()
 
@@ -1862,23 +1879,26 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 # Solution: For Deposit Wallet, you MUST provide pre-generated API creds from Polymarket UI.
                 creds = None
 
-                # Auto-derive matching L2 API credentials directly on this ClobClient instance
-                mode_label = "Deposit Wallet" if (sig_type == 3 and funder) else "EOA"
-                logger.info(f"🔑 [L2 CREDS] Auto-deriving fresh CLOB API Credentials ({mode_label} mode)...")
-                try:
-                    derived_creds = self.clob_client.create_or_derive_api_key()
-                    if derived_creds:
-                        creds = ApiCreds(
-                            api_key=derived_creds.api_key,
-                            api_secret=derived_creds.api_secret,
-                            api_passphrase=derived_creds.api_passphrase
-                        )
-                        logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
-                except Exception as derive_err:
-                    logger.warning(f"⚠ L2 credential auto-derivation notice: {derive_err}")
-                    if api_key and secret and passphrase:
-                        creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase)
-                        logger.info(f"🔑 [L2 CREDS] Falling back to .env credentials: {api_key[:8]}...")
+                # Credential Resolution Priority:
+                # 1. Provided .env credentials (required for Deposit Wallet / sig_type=3 to prevent EOA address mismatch)
+                # 2. Auto-derivation fallback (for standard EOA / sig_type=0)
+                if api_key and secret and passphrase:
+                    creds = ApiCreds(api_key=api_key, api_secret=secret, api_passphrase=passphrase)
+                    logger.info(f"🔑 [L2 CREDS] Using provided .env CLOB API credentials: {api_key[:8]}...")
+                else:
+                    mode_label = "Deposit Wallet" if (sig_type == 3 and funder) else "EOA"
+                    logger.info(f"🔑 [L2 CREDS] Auto-deriving fresh CLOB API Credentials ({mode_label} mode)...")
+                    try:
+                        derived_creds = self.clob_client.create_or_derive_api_key()
+                        if derived_creds:
+                            creds = ApiCreds(
+                                api_key=derived_creds.api_key,
+                                api_secret=derived_creds.api_secret,
+                                api_passphrase=derived_creds.api_passphrase
+                            )
+                            logger.info(f"🔑 [L2 CREDS] Successfully derived L2 API Key: {creds.api_key[:8]}...")
+                    except Exception as derive_err:
+                        logger.warning(f"⚠ L2 credential auto-derivation notice: {derive_err}")
 
                 if creds:
                     self.clob_client.set_api_creds(creds)
@@ -1911,7 +1931,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
         position_usd: float,
         token_id: str,
         current_bid: Optional[float] = None,
-        current_ask: Optional[float] = None
+        current_ask: Optional[float] = None,
+        opposite_token_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         if config.is_dry_run() or not self.clob_client:
             logger.info("Live execution fallback: Delegating to DryExecutionStrategy (Simulation Mode active).")
@@ -1922,7 +1943,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 token_id=token_id,
                 trigger_odds_10s_ago=target_price,
                 entry_odds=current_ask or target_price,
-                position_usd=position_usd
+                position_usd=position_usd,
+                opposite_token_id=opposite_token_id
             )
 
         spend_usd = position_usd
@@ -1967,6 +1989,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 "Candle_Start": candle_start,
                 "Slug": slug,
                 "Token_Id": token_id,
+                "Opposite_Token_Id": opposite_token_id,
                 "Position_Side": side,
                 "Entry_Timestamp": now_dt,
                 "Order_Timestamp_Sec": now_ts,

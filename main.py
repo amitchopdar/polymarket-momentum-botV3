@@ -52,13 +52,16 @@ class PolymarketBot:
         self.notifier = TelegramNotifier()
         self.telegram_bot = TelegramCommandRouter(self.notifier, db_path=self.db_path)
 
+        # Settlement Tracker (Resolves Hedged & Expired Positions on Gamma API)
+        self.settlement_tracker = SettlementTracker(self.async_writer, notifier=self.notifier)
+
         # V2 / V3 Odds Momentum Strategy Engine (Select Live vs Dry Run based on config)
         if not config.is_dry_run():
             logger.info("⚡ [LIVE STRATEGY ENGINE] Instantiating LiveExecutionStrategy with authenticated Polymarket CLOB client...")
-            self.v2_strategy = LiveExecutionStrategy(self.async_writer, notifier=self.notifier)
+            self.v2_strategy = LiveExecutionStrategy(self.async_writer, notifier=self.notifier, settlement_tracker=self.settlement_tracker)
         else:
             logger.info("📄 [DRY RUN STRATEGY ENGINE] Instantiating DryExecutionStrategy (Paper Simulation)...")
-            self.v2_strategy = V2OddsMomentumStrategy(self.async_writer, notifier=self.notifier)
+            self.v2_strategy = V2OddsMomentumStrategy(self.async_writer, notifier=self.notifier, settlement_tracker=self.settlement_tracker)
 
         self.running = False
         self._last_preflight_sec = -1
@@ -79,6 +82,7 @@ class PolymarketBot:
 
         self.running = True
         self.async_writer.start()
+        self.settlement_tracker.start()
 
         if getattr(config, "telegram_enabled", True):
             self.notifier.start()
@@ -109,6 +113,10 @@ class PolymarketBot:
         if hasattr(self, "telegram_bot"):
             logger.info("Stopping Telegram command router...")
             self.telegram_bot.stop()
+
+        if hasattr(self, "settlement_tracker"):
+            logger.info("Stopping Settlement Tracker...")
+            self.settlement_tracker.stop()
 
         if hasattr(self, "notifier"):
             logger.info("Stopping Telegram notifier...")
@@ -145,10 +153,13 @@ class PolymarketBot:
         up_bid, up_ask, dn_bid, dn_ask = self.polymarket_ws.get_live_bid_ask(up_tok, dn_tok)
 
         # 1. Feed real-time ticks into V2 Odds Momentum Strategy Engine
-        if up_tok and up_ask is not None:
-            self.v2_strategy.process_tick(candle_start_str, slug, "UP", up_tok, up_bid, up_ask)
-        if dn_tok and dn_ask is not None:
-            self.v2_strategy.process_tick(candle_start_str, slug, "DOWN", dn_tok, dn_bid, dn_ask)
+        try:
+            if up_tok and up_ask is not None:
+                self.v2_strategy.process_tick(candle_start_str, slug, "UP", up_tok, up_bid, up_ask, opposite_token_id=dn_tok)
+            if dn_tok and dn_ask is not None:
+                self.v2_strategy.process_tick(candle_start_str, slug, "DOWN", dn_tok, dn_bid, dn_ask, opposite_token_id=up_tok)
+        except Exception as e:
+            logger.error(f"⚠ [TICK PROCESSOR ERROR] Error evaluating tick for candle {candle_start_str}: {e}", exc_info=True)
 
         # 2. Log status every 3 seconds
         if (now - self._last_tick_log) >= 3.0:

@@ -2,7 +2,8 @@ import time
 import sqlite3
 import pytest
 from src.database.schema import create_tables
-from src.execution.strategy import V2OddsMomentumStrategy
+from unittest.mock import MagicMock
+from src.execution.strategy import V2OddsMomentumStrategy, LiveExecutionStrategy
 from src.config import config
 
 @pytest.fixture
@@ -684,7 +685,164 @@ def test_v3_synthetic_hedge_timeout_without_bounce(memory_db):
     assert pos["Exit_Reason"] == "EMERGENCY_DIRECT_SL"
 
 
+def test_live_execution_strategy_entry_opposite_token_and_fallback():
+    """
+    Verifies LiveExecutionStrategy.execute_entry accepts opposite_token_id,
+    retains it across live execution dicts, forwards it during simulation fallback,
+    and returns None if live order is rejected.
+    """
+    notifier = MagicMock()
+    async_writer = MagicMock()
+
+    # 1. Live mode placement
+    strat = LiveExecutionStrategy(async_writer=async_writer, notifier=notifier)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+    mock_clob.create_order.return_value = {"signed": True}
+    mock_clob.post_order.return_value = {"orderID": "0xLIVE_123"}
+
+    res = strat.execute_entry(
+        candle_start="2026-08-05 00:40:00",
+        slug="btc-updown-5m-1785832400",
+        side="UP",
+        prob_cal=0.50,
+        prob_uncal=0.50,
+        target_price=0.70,
+        position_usd=5.0,
+        token_id="UP_TOKEN_1",
+        current_bid=0.69,
+        current_ask=0.70,
+        opposite_token_id="DOWN_TOKEN_1"
+    )
+    assert res is not None
+    assert res["Opposite_Token_Id"] == "DOWN_TOKEN_1"
+    assert res["Buy_Order_Id"] == "0xLIVE_123"
+
+    # 2. Simulation fallback
+    strat_dry = LiveExecutionStrategy(async_writer=async_writer, notifier=notifier)
+    strat_dry.clob_client = None
+    res_dry = strat_dry.execute_entry(
+        candle_start="2026-08-05 00:40:00",
+        slug="btc-updown-5m-1785832400",
+        side="UP",
+        prob_cal=0.50,
+        prob_uncal=0.50,
+        target_price=0.70,
+        position_usd=5.0,
+        token_id="UP_TOKEN_1",
+        current_bid=0.69,
+        current_ask=0.70,
+        opposite_token_id="DOWN_TOKEN_1"
+    )
+    assert res_dry is not None
+    assert res_dry["Opposite_Token_Id"] == "DOWN_TOKEN_1"
+
+    # 3. Rejected live order returns None and resets active_position
+    strat_fail = LiveExecutionStrategy(async_writer=async_writer, notifier=notifier)
+    mock_clob_fail = MagicMock()
+    strat_fail.clob_client = mock_clob_fail
+    mock_clob_fail.create_order.return_value = {"signed": True}
+    mock_clob_fail.post_order.return_value = None
+
+    strat_fail.dry_strategy.tick_buffers["UP_TOK"] = [(100.0, 0.50, 0.50)] * 10
+    res_fail = strat_fail.process_tick("2026-08-05 00:40:00", "btc-updown-5m-1785832400", "UP", "UP_TOK", 0.69, 0.70, opposite_token_id="DN_TOK")
+    assert res_fail is None
+    assert strat_fail.dry_strategy.active_position is None
 
 
+def test_settlement_tracker_wiring_and_injection():
+    """
+    Verifies SettlementTracker is properly accepted by LiveExecutionStrategy and forwarded
+    to V2OddsMomentumStrategy.
+    """
+    mock_tracker = MagicMock()
+    mock_writer = MagicMock()
+    mock_notifier = MagicMock()
+
+    live_strat = LiveExecutionStrategy(async_writer=mock_writer, notifier=mock_notifier, settlement_tracker=mock_tracker)
+    assert live_strat.settlement_tracker is mock_tracker
+    assert live_strat.dry_strategy.settlement_tracker is mock_tracker
 
 
+def test_telegram_enqueue_notification_alias():
+    """
+    Verifies TelegramNotifier implements enqueue_notification without raising AttributeError.
+    """
+    from src.notifications.notifier import TelegramNotifier
+    notifier = TelegramNotifier(bot_token="FAKE_TOKEN", chat_id="123456")
+    notifier.enqueue_notification("<b>Test Notification</b>")
+    assert notifier.msg_queue.qsize() == 1
+
+
+def test_candle_rollover_unlocks_position_guard_and_enqueues_settlement():
+    """
+    Verifies that on 5-minute candle boundary rollover:
+    1. An active filled position is handed off to SettlementTracker.
+    2. Any resting TP order is cancelled.
+    3. active_position is set to None, unlocking the bot to trade subsequent candles without deadlock.
+    """
+    mock_tracker = MagicMock()
+    mock_writer = MagicMock()
+    mock_notifier = MagicMock()
+
+    strat = V2OddsMomentumStrategy(async_writer=mock_writer, notifier=mock_notifier, settlement_tracker=mock_tracker)
+    strat.cancel_order_on_exchange = MagicMock()
+
+    # Simulate an active OPEN position from Candle 1
+    strat.active_position = {
+        "Candle_Start": "2026-08-05 00:40:00",
+        "Slug": "btc-updown-5m-1785832400",
+        "Token_Id": "TOK_UP_1",
+        "Opposite_Token_Id": "TOK_DN_1",
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Buy_Order_Id": "BUY_123",
+        "Tp_Order_Id": "TP_456",
+        "Filled_Quantity": 5.0,
+        "Target_Buy_Price": 0.70
+    }
+
+    # Tick arrives for Candle 2 (different candle_start)
+    res = strat._close_expired_position()
+
+    # Verify: Handed off to settlement tracker
+    mock_tracker.enqueue_settlement.assert_called_once()
+    # Verify: Resting TP order cancelled
+    strat.cancel_order_on_exchange.assert_called_with("TP_456")
+    # Verify: active_position cleared (no deadlock)
+    assert strat.active_position is None
+
+
+def test_pnl_summary_includes_hedged_and_settled():
+    """
+    Verifies TelegramCommandRouter._calculate_pnl_summary queries HEDGED_LOCKED and RESOLVED_SETTLED.
+    """
+    from src.notifications.telegram_bot import TelegramCommandRouter
+    import sqlite3
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".sqlite") as tmp:
+        conn = sqlite3.connect(tmp.name)
+        from src.database.schema import create_tables
+        create_tables(conn)
+
+        # Insert 1 CLOSED win, 1 HEDGED_LOCKED loss, 1 RESOLVED_SETTLED win
+        now_dt = "2026-08-05 00:40:00"
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO Positions (Candle_Start, Slug, Token_Id, Position_Side, Entry_Timestamp, Target_Buy_Price, Target_Quantity, Position_Status, Pnl, Updated_At)
+            VALUES 
+                ('2026-08-05 00:40:00', 's1', 't1', 'UP', ?, 0.70, 5.0, 'CLOSED', 1.50, ?),
+                ('2026-08-05 00:45:00', 's2', 't2', 'UP', ?, 0.70, 5.0, 'HEDGED_LOCKED', -0.35, ?),
+                ('2026-08-05 00:50:00', 's3', 't3', 'DOWN', ?, 0.70, 5.0, 'RESOLVED_SETTLED', 2.00, ?);
+        """, (now_dt, now_dt, now_dt, now_dt, now_dt, now_dt))
+        conn.commit()
+        conn.close()
+
+        router = TelegramCommandRouter(MagicMock(), db_path=tmp.name)
+        summary = router._calculate_pnl_summary()
+        assert summary["total"] == 3
+        assert summary["closed"] == 3
+        assert summary["wins"] == 2
+        assert summary["losses"] == 1
+        assert summary["total_pnl"] == 3.15
