@@ -538,7 +538,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
             limit_buy_price = round(max(0.01, current_ask - maker_offset), 4)
-            raw_qty = round(getattr(config, "max_position_size_usd", 4.0) / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            pos_size_usd = getattr(config, "max_position_size_usd", 5.0)
+            raw_qty = round(pos_size_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
             target_qty = max(5.0, raw_qty)
             now_sec = time.time()
             now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -568,7 +569,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     prob_cal=0.50,
                     prob_uncal=0.50,
                     target_price=current_ask,
-                    position_usd=getattr(config, "max_position_size_usd", 2.0),
+                    position_usd=pos_size_usd,
                     token_id=token_id,
                     current_bid=current_bid,
                     current_ask=current_ask
@@ -1654,16 +1655,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 position_usd=position_usd
             )
 
-        # Pre-flight check available USDC collateral balance
-        avail_usdc = self.get_collateral_balance()
-        if avail_usdc > 0 and avail_usdc < 1.00:
-            logger.warning(f"⚠ [LIVE BALANCE INSUFFICIENT] Available USDC=${avail_usdc:.2f} is less than $1.00 minimum order size. Skipping entry.")
-            return None
-
         spend_usd = position_usd
-        if avail_usdc > 0 and avail_usdc < position_usd:
-            spend_usd = max(1.00, round(avail_usdc - 0.05, 2))
-            logger.info(f"ℹ [POSITION SIZING ADJUSTMENT] Available USDC=${avail_usdc:.2f} < Requested ${position_usd:.2f}. Adjusting spend to ${spend_usd:.2f}.")
 
         # Real Polymarket CLOB REST API Order Dispatch via py-clob-client V2
         try:
