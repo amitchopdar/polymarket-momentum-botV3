@@ -445,64 +445,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if self.active_position and self.active_position.get("Position_Status") == "OPEN" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_tp_sl_exit(current_bid or current_ask, current_ask)
 
-        # 4. Live Token Holding Check: If no active position in memory, check if wallet already holds tokens for this candle
-        if self.active_position is None and self.live_strategy and hasattr(self.live_strategy, "get_token_balance") and token_id:
-            tok_bal = self.live_strategy.get_token_balance(token_id)
-            if tok_bal >= 0.5:
-                eff_p = current_bid or current_ask
-                hwm = eff_p or 0.70
-                trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
-                stop_loss_price = round(max(0.01, hwm - trailing_dist), 4)
-                take_profit_price = round(min(0.9900, hwm + getattr(config, "v2_take_profit_cents", 0.20)), 4)
-                now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-                recovered_pos = {
-                    "Candle_Start": candle_start,
-                    "Slug": slug,
-                    "Token_Id": token_id,
-                    "Position_Side": side,
-                    "Entry_Timestamp": now_dt,
-                    "Order_Timestamp_Sec": now_sec,
-                    "Trigger_Odds_10s_Ago": eff_p,
-                    "Entry_Odds": eff_p,
-                    "Target_Buy_Price": eff_p,
-                    "Target_Quantity": tok_bal,
-                    "Filled_Quantity": tok_bal,
-                    "Sell_Quantity": 0.0,
-                    "Average_Fill_Price": eff_p,
-                    "Take_Profit_Price": take_profit_price,
-                    "Stop_Loss_Price": stop_loss_price,
-                    "High_Water_Mark": hwm,
-                    "Buy_Order_Id": f"RECOVERED_{token_id[:8]}_{int(now_sec)}",
-                    "Position_Status": "OPEN",
-                    "Pnl": 0.0,
-                    "Updated_At": now_dt
-                }
-                self.active_position = recovered_pos
-                logger.warning(
-                    f"🛡 [LIVE POSITION RECOVERY] Detected {tok_bal:.4f} open shares for token {token_id[:8]} on exchange! "
-                    f"Adopting into active tracking: TP=${take_profit_price:.4f} | SL=${stop_loss_price:.4f}"
-                )
-                if self.async_writer:
-                    sql = """
-                        INSERT INTO Positions (
-                            Candle_Start, Slug, Token_Id, Position_Side, Entry_Timestamp,
-                            Trigger_Odds_10s_Ago, Entry_Odds, Target_Buy_Price, Average_Fill_Price,
-                            Target_Quantity, Filled_Quantity, Take_Profit_Price, Stop_Loss_Price,
-                            High_Water_Mark, Buy_Order_Id, Position_Status, Pnl, Updated_At
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """
-                    self.async_writer.enqueue_write(
-                        sql,
-                        (
-                            candle_start, slug, token_id, side, now_dt,
-                            eff_p, eff_p, eff_p, eff_p,
-                            tok_bal, tok_bal, take_profit_price, stop_loss_price,
-                            hwm, recovered_pos["Buy_Order_Id"], "OPEN", 0.0, now_dt
-                        )
-                    )
-                return recovered_pos
-
         # 5. Single Position / Order Guard: Reject new entry if an active position is PENDING_FILL, OPEN, or CLOSING
         if self.active_position is not None:
             return None
