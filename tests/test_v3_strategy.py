@@ -846,3 +846,142 @@ def test_pnl_summary_includes_hedged_and_settled():
         assert summary["wins"] == 2
         assert summary["losses"] == 1
         assert summary["total_pnl"] == 3.15
+
+
+def test_v3_marketable_taker_hedge_pricing():
+    """
+    Verifies that when opposite token ask is known ($0.54),
+    the synthetic hedge limit buy is priced as a marketable taker at Opposite_Ask + Buffer ($0.55).
+    """
+    strat = V2OddsMomentumStrategy(async_writer=None)
+    candle_start = "2026-09-18 11:00:00"
+    slug = "btc-updown-5m-1789716000"
+    token_up = "TOK_UP_TAKER"
+    token_dn = "TOK_DN_TAKER"
+
+    # Setup OPEN position on UP
+    strat.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.71,
+        "Average_Fill_Price": 0.71,
+        "Target_Quantity": 5.0,
+        "Filled_Quantity": 5.0,
+        "Take_Profit_Price": 0.91,
+        "Stop_Loss_Price": 0.62,
+        "High_Water_Mark": 0.71,
+        "Tp_Order_Id": "0xTP_RESTING_999",
+        "Order_Timestamp_Sec": time.time(),
+    }
+
+    # Simulate price drop on UP to 0.46 (<= SL 0.62), while DOWN ask surged to 0.54
+    strat.process_tick(
+        candle_start, slug, "UP", token_up, 0.45, 0.46,
+        opposite_token_id=token_dn, opposite_bid=0.53, opposite_ask=0.54
+    )
+
+    pos = strat.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "HEDGED_LOCKED"
+    # Marketable Limit Buy Price = max(1 - 0.62, 0.54) + 0.01 = 0.54 + 0.01 = 0.55
+    assert pos["Hedge_Limit_Buy_Price"] == 0.55
+    assert pos["Hedge_Buy_Price"] == 0.54
+    assert pos["Hedge_Token_Id"] == token_dn
+    assert pos["Hedge_Quantity"] == 5.0
+
+
+def test_v3_hedge_max_price_cap_fallback():
+    """
+    Verifies that when opposite token ask surges past max hedge price cap ($0.65),
+    the bot skips the hedge to protect capital and liquidates directly.
+    """
+    strat = V2OddsMomentumStrategy(async_writer=None)
+    candle_start = "2026-09-18 11:00:00"
+    slug = "btc-updown-5m-1789716000"
+    token_up = "TOK_UP_CAP"
+    token_dn = "TOK_DN_CAP"
+
+    strat.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.71,
+        "Average_Fill_Price": 0.71,
+        "Target_Quantity": 5.0,
+        "Filled_Quantity": 5.0,
+        "Take_Profit_Price": 0.91,
+        "Stop_Loss_Price": 0.62,
+        "High_Water_Mark": 0.71,
+        "Tp_Order_Id": "0xTP_RESTING_888",
+        "Order_Timestamp_Sec": time.time(),
+    }
+
+    pos = strat.active_position
+    # DOWN ask is 0.75 (exceeds v3_max_hedge_price of 0.65)
+    strat.process_tick(
+        candle_start, slug, "UP", token_up, 0.45, 0.46,
+        opposite_token_id=token_dn, opposite_bid=0.74, opposite_ask=0.75
+    )
+
+    # In dry simulation mode, emergency liquidation directly closes position and clears active_position
+    assert pos["Position_Status"] == "CLOSED"
+    assert pos["Exit_Reason"] == "EMERGENCY_DIRECT_SL"
+    assert strat.active_position is None
+
+
+def test_v3_hedge_subsecond_timeout():
+    """
+    Verifies that _evaluate_pending_hedge uses the sub-second timeout threshold (0.8s).
+    0.9s elapsed triggers timeout (whereas previous 2.0s timeout would not have triggered).
+    """
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 11:20:00"
+    slug = "btc-updown-5m-1789717200"
+    token_up = "TOK_UP_SUBSEC"
+    token_dn = "TOK_DN_SUBSEC"
+
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "PENDING_HEDGE",
+        "Target_Buy_Price": 0.71,
+        "Average_Fill_Price": 0.71,
+        "Target_Quantity": 5.0,
+        "Filled_Quantity": 5.0,
+        "Take_Profit_Price": 0.91,
+        "Stop_Loss_Price": 0.62,
+        "Hedge_Token_Id": token_dn,
+        "Hedge_Order_Id": "0xHEDGE_SUBSEC_1",
+        "Hedge_Timestamp_Sec": now_sec - 0.9,  # 0.9s elapsed (> 0.8s timeout, but < 2.0s)
+        "Hedge_Quantity": 5.0,
+        "Hedge_Buy_Price": 0.38,
+    }
+
+    mock_clob.get_balance_allowance.return_value = {"balance": "0"}
+    mock_clob.get_order.return_value = {"status": "OPEN", "size_matched": "0.0"}
+
+    # Primary price still <= SL ($0.45 <= $0.62)
+    res = strat.dry_strategy._evaluate_pending_hedge(current_bid=0.45, current_ask=0.46)
+
+    # 0.9s exceeded 0.8s timeout -> Order cancelled and transitioned to CLOSING
+    mock_clob.cancel_orders.assert_called()
+    assert res is not None
+    assert res["Position_Status"] == "CLOSING"
+    assert res["Exit_Reason"] == "EMERGENCY_DIRECT_SL"

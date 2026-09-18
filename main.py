@@ -156,9 +156,15 @@ class PolymarketBot:
         # 1. Feed real-time ticks into V2 Odds Momentum Strategy Engine
         try:
             if up_tok and up_ask is not None:
-                self.v2_strategy.process_tick(candle_start_str, slug, "UP", up_tok, up_bid, up_ask, opposite_token_id=dn_tok)
+                self.v2_strategy.process_tick(
+                    candle_start_str, slug, "UP", up_tok, up_bid, up_ask,
+                    opposite_token_id=dn_tok, opposite_bid=dn_bid, opposite_ask=dn_ask
+                )
             if dn_tok and dn_ask is not None:
-                self.v2_strategy.process_tick(candle_start_str, slug, "DOWN", dn_tok, dn_bid, dn_ask, opposite_token_id=up_tok)
+                self.v2_strategy.process_tick(
+                    candle_start_str, slug, "DOWN", dn_tok, dn_bid, dn_ask,
+                    opposite_token_id=up_tok, opposite_bid=up_bid, opposite_ask=up_ask
+                )
         except Exception as e:
             logger.error(f"⚠ [TICK PROCESSOR ERROR] Error evaluating tick for candle {candle_start_str}: {e}", exc_info=True)
 
