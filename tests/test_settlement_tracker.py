@@ -52,6 +52,7 @@ def test_synthetic_stop_loss_hedge_lock(memory_db):
 
     config.trade_size_shares = 7.0
     config.stop_loss_mode = "SYNTHETIC_HEDGE"
+    config.v2_trailing_sl_distance_cents = 0.07
 
     # 1. Enter UP at Ask $0.70 -> Limit $0.71 (PENDING_FILL with Opposite_Token_Id)
     pos = strat.process_tick(candle_start, slug, "UP", up_tok, 0.69, 0.70, opposite_token_id=dn_tok)
