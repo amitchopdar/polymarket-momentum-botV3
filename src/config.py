@@ -77,6 +77,7 @@ USER_V2_STOP_LOSS_SLIPPAGE_CENTS = 0.03   # Stop Loss exit slippage for Limit Se
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.60       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
 USER_V2_MAX_ENTRY_ODDS_CEILING = 0.92     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
 USER_V3_TRADE_SIZE_SHARES = 5.0           # Number of shares to trade per signal (e.g. 5.0, 10.0, 20.0)
+USER_V3_MAX_CANDLE_ENTRY_SEC = 240.0      # Max seconds into 5m candle to allow entry (240s = 4 minutes, blocks trades during last 60s)
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
@@ -140,6 +141,7 @@ class AppConfig:
     def max_position_size_usd(self) -> float:
         """Dynamic USD exposure based on share count (at max price $1.00)"""
         return round(self.trade_size_shares * 1.0, 2)
+    max_candle_entry_sec: float = field(default_factory=lambda: _safe_float(os.getenv("MAX_CANDLE_ENTRY_SEC"), USER_V3_MAX_CANDLE_ENTRY_SEC))
     max_active_positions: int = field(default_factory=lambda: _safe_int(os.getenv("MAX_ACTIVE_POSITIONS"), USER_V2_MAX_ACTIVE_POSITIONS))
 
     # V3 Execution Configuration

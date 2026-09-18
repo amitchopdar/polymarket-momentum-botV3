@@ -595,3 +595,46 @@ def test_v3_sl_trigger_recognizes_resting_tp_already_matched():
 
     # Position must be closed as a TAKE_PROFIT WIN, and active_position cleared!
     assert strat.dry_strategy.active_position is None
+
+
+
+def test_v3_candle_4m_entry_cutoff():
+    """
+    Verifies that trade entries are permitted during the first 4 minutes (0-239s),
+    but strictly blocked after 4 minutes (>= 240s) of any 5m candle.
+    """
+    import unittest.mock
+    from datetime import datetime, timezone
+    from src.execution.strategy import V2OddsMomentumStrategy
+
+    strat = V2OddsMomentumStrategy(async_writer=None)
+    candle_start = "2026-09-18 20:00:00"
+    dt_obj = datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    base_ts = dt_obj.timestamp()
+
+    slug = "btc-updown-5m-1789747200"
+    token_up = "TOK_UP_CUTOFF_TEST"
+
+    # Case 1: 120s into candle (2m mark). Momentum jump occurs -> Trade should enter!
+    with unittest.mock.patch("time.time", return_value=base_ts + 120.0):
+        strat.tick_buffers[token_up] = [(base_ts + 110.0, 0.50, 0.50)]
+        pos = strat.process_tick(candle_start, slug, "UP", token_up, 0.70, 0.71)
+        assert pos is not None
+        assert strat.active_position is not None
+
+    # Reset active position
+    strat.active_position = None
+
+    # Case 2: 245s into candle (4m 5s mark). Momentum jump occurs -> Must be BLOCKED!
+    with unittest.mock.patch("time.time", return_value=base_ts + 245.0):
+        strat.tick_buffers[token_up] = [(base_ts + 235.0, 0.50, 0.50)]
+        pos_blocked = strat.process_tick(candle_start, slug, "UP", token_up, 0.70, 0.71)
+        assert pos_blocked is None
+        assert strat.active_position is None
+
+    # Case 3: 290s into candle (4m 50s mark). Must also be BLOCKED!
+    with unittest.mock.patch("time.time", return_value=base_ts + 290.0):
+        strat.tick_buffers[token_up] = [(base_ts + 280.0, 0.50, 0.50)]
+        pos_blocked_2 = strat.process_tick(candle_start, slug, "UP", token_up, 0.70, 0.71)
+        assert pos_blocked_2 is None
+        assert strat.active_position is None

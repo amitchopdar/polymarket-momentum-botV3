@@ -471,8 +471,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 dt_obj = datetime.strptime(candle_start, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                 candle_start_ts = dt_obj.timestamp()
                 sec_in_candle = int(now_sec - candle_start_ts)
-                if 285 <= sec_in_candle < 300:
-                    logger.info(f"⌛ [15s CANDLE ENTRY CUTOFF] Skipping new trade entry at {sec_in_candle}s into candle.")
+                max_entry_sec = getattr(config, "max_candle_entry_sec", 240.0)
+                if max_entry_sec <= sec_in_candle < 300:
+                    logger.info(f"⌛ [4m CANDLE ENTRY CUTOFF] Skipping new trade entry at {sec_in_candle}s into candle (Limit: {max_entry_sec:.0f}s / 4 minutes).")
                     return None
             except Exception:
                 pass
