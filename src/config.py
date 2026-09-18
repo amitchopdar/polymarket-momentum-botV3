@@ -66,14 +66,14 @@ if os.path.exists(_env_file):
 # ==============================================================================
 
 USER_EXECUTION_MODE = "LIVE"
-USER_V2_MOMENTUM_THRESHOLD_CENTS = 0.15   # 15-cent (+0.15) absolute odds increase threshold
+USER_V2_MOMENTUM_THRESHOLD_CENTS = 0.20   # 15-cent (+0.15) absolute odds increase threshold
 USER_V2_MOMENTUM_WINDOW_SEC = 10.0        # Sliding momentum lookback window (10 seconds)
-USER_V2_TAKE_PROFIT_CENTS = 0.20          # Take Profit absolute cents gain target (+0.20 / +20 cents for Tier 1)
-USER_V2_HIGH_ODDS_CUTOFF = 0.80           # High odds cutoff threshold for Tier 2 ($0.80 / 80 cents)
+USER_V2_TAKE_PROFIT_CENTS = 0.15          # Take Profit absolute cents gain target (+0.20 / +20 cents for Tier 1)
+USER_V2_HIGH_ODDS_CUTOFF = 0.85           # High odds cutoff threshold for Tier 2 ($0.80 / 80 cents)
 USER_V2_HIGH_ODDS_TP_TARGET = 0.9900      # Fixed TP target price for Tier 2 ($0.99 / $1.00 max exchange limit price)
 USER_V2_TRAILING_SL_ENABLED = True        # Enable Trailing Stop Loss based on High Water Mark
-USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.10 # Trailing SL distance from HWM (10 cents)
-USER_V2_STOP_LOSS_SLIPPAGE_CENTS = 0.02   # Stop Loss exit slippage for Limit Sell orders (2 cents)
+USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.07 # Trailing SL distance from HWM (10 cents)
+USER_V2_STOP_LOSS_SLIPPAGE_CENTS = 0.01   # Stop Loss exit slippage for Limit Sell orders (2 cents)
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.65       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
 USER_V2_MAX_ENTRY_ODDS_CEILING = 0.92     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
 USER_V2_MAX_POSITION_SIZE_USD = 5.0       # Max position size per trade ($5.00)

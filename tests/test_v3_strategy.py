@@ -53,7 +53,7 @@ def test_v3_successful_maker_fill(memory_db):
     assert strat.active_position["Position_Status"] == "OPEN"
     assert strat.active_position["Average_Fill_Price"] == 0.70
     assert strat.active_position["Take_Profit_Price"] == round(0.70 + getattr(config, "v2_take_profit_cents", 0.20), 4)
-    assert strat.active_position["Stop_Loss_Price"] == 0.60    # HWM = $0.70 -> SL = $0.60 ($0.70 - 0.10)
+    assert strat.active_position["Stop_Loss_Price"] == round(0.70 - getattr(config, "v2_trailing_sl_distance_cents", 0.07), 4)
 
 def test_v3_order_timeout_cancellation(memory_db):
     strat = V2OddsMomentumStrategy(async_writer=None)
@@ -213,7 +213,7 @@ def test_v3_buy_fill_price_extraction_and_zero_balance_liquidation(memory_db):
     assert pos is not None
     assert pos["Position_Status"] == "OPEN"
     assert pos["Average_Fill_Price"] == 0.5800
-    assert pos["Stop_Loss_Price"] == 0.4800
+    assert pos["Stop_Loss_Price"] == round(0.5800 - getattr(config, "v2_trailing_sl_distance_cents", 0.07), 4)
     assert pos["Take_Profit_Price"] == round(0.58 + getattr(config, "v2_take_profit_cents", 0.20), 4)
 
     # 2. Re-Chase / Zero Balance reconciliation test:
@@ -437,7 +437,7 @@ def test_v3_timeout_cancel_match_and_token_balance_recovery(memory_db):
     assert pos["Position_Status"] == "OPEN"
     assert pos["Filled_Quantity"] == 6.9444
     assert pos["Average_Fill_Price"] == 0.7200
-    assert pos["Stop_Loss_Price"] == 0.6200  # 0.72 - 0.10 trailing SL
+    assert pos["Stop_Loss_Price"] == round(0.7200 - getattr(config, "v2_trailing_sl_distance_cents", 0.07), 4)
 
     # 2. Price crashes to $0.60 <= Stop Loss $0.62 -> Stop Loss MUST trigger!
     mock_clob.post_order.return_value = {"orderID": "0xSL_EXIT_999"}
