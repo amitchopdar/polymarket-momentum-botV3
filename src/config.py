@@ -66,23 +66,23 @@ if os.path.exists(_env_file):
 # ==============================================================================
 
 USER_EXECUTION_MODE = "LIVE"
-USER_V2_MOMENTUM_THRESHOLD_CENTS = 0.20   # 15-cent (+0.15) absolute odds increase threshold
+USER_V2_MOMENTUM_THRESHOLD_CENTS = 0.15   # 15-cent (+0.15) absolute odds increase threshold
 USER_V2_MOMENTUM_WINDOW_SEC = 10.0        # Sliding momentum lookback window (10 seconds)
-USER_V2_TAKE_PROFIT_CENTS = 0.15          # Take Profit absolute cents gain target (+0.20 / +20 cents for Tier 1)
+USER_V2_TAKE_PROFIT_CENTS = 0.20          # Take Profit absolute cents gain target (+0.20 / +20 cents for Tier 1)
 USER_V2_HIGH_ODDS_CUTOFF = 0.85           # High odds cutoff threshold for Tier 2 ($0.80 / 80 cents)
 USER_V2_HIGH_ODDS_TP_TARGET = 0.9900      # Fixed TP target price for Tier 2 ($0.99 / $1.00 max exchange limit price)
 USER_V2_TRAILING_SL_ENABLED = True        # Enable Trailing Stop Loss based on High Water Mark
 USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.07 # Trailing SL distance from HWM (10 cents)
 USER_V2_STOP_LOSS_SLIPPAGE_CENTS = 0.01   # Stop Loss exit slippage for Limit Sell orders (2 cents)
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.65       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
-USER_V2_MAX_ENTRY_ODDS_CEILING = 0.92     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
-USER_V3_TRADE_SIZE_SHARES = 7.0           # Fixed number of shares to trade per signal (min 5.0)
+USER_V2_MAX_ENTRY_ODDS_CEILING = 0.95     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
+USER_V3_TRADE_SIZE_SHARES = 5.0           # Fixed number of shares to trade per signal (min 5.0)
 USER_V3_STOP_LOSS_MODE = "SYNTHETIC_HEDGE" # Stop loss mode: SYNTHETIC_HEDGE or DIRECT_SELL
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
 USER_V3_BUY_SLIPPAGE_CENTS = 0.01          # 1 cent (+0.01) buffer above ask for entry marketable limit buy fill
-USER_V3_HEDGE_SLIPPAGE_CENTS = 0.01        # 1 cent (+0.01) buffer above ask for synthetic stop-loss hedge order
+USER_V3_HEDGE_SLIPPAGE_CENTS = 0.02        # 1 cent (+0.01) buffer above ask for synthetic stop-loss hedge order
 USER_V3_MAKER_OFFSET_CENTS = 0.01         # Alias for buy offset
 USER_V3_MAKER_ORDER_TIMEOUT_SEC = 5.0     # 5 seconds order cancellation timeout
 # ==============================================================================

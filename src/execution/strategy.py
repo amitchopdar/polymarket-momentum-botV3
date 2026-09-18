@@ -439,6 +439,10 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if self.active_position and self.active_position.get("Position_Status") == "PENDING_FILL" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_pending_fill(current_bid, current_ask)
 
+        # 1.5 Evaluate active PENDING_HEDGE position for fill or 2s timeout
+        if self.active_position and self.active_position.get("Position_Status") == "PENDING_HEDGE":
+            self._evaluate_pending_hedge(current_bid, current_ask)
+
         # 2. Evaluate active CLOSING position for sell fill confirmation on exchange
         if self.active_position and self.active_position.get("Position_Status") == "CLOSING" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_closing_position(current_bid, current_ask)
@@ -1432,14 +1436,13 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
     ) -> Optional[Dict[str, Any]]:
         """
         Executes Method 3: Opposite Token Synthetic Stop-Loss (Cross-Hedge Lock).
-        Buys the exact matching quantity of the opposite token, locking the position
-        as 100% Delta-Neutral (1 UP + 1 DOWN = $1.00 USDC) with zero execution slippage.
-        Transitions position status to 'HEDGED_LOCKED'.
+        Buys the exact matching quantity of the opposite token with a 2-second fill timeout
+        and pre-sell bounce recovery check before fallback direct liquidation.
         """
         opp_token_id = pos.get("Opposite_Token_Id")
         if not opp_token_id:
             logger.warning("⚠ [SYNTHETIC HEDGE ABORT] No Opposite_Token_Id recorded for position. Falling back to direct sell.")
-            return None
+            return self._execute_direct_sell_liquidation(pos, current_bid, current_ask)
 
         now_ts = time.time()
         now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -1459,33 +1462,151 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         hedge_order_id = f"HEDGE_{int(now_ts*1000)}"
         hedge_fill_price = round(1.0000 - sl_price, 4)
 
-        if self.live_strategy and self.live_strategy.clob_client:
+        pos["Position_Status"] = "PENDING_HEDGE"
+        pos["Hedge_Token_Id"] = opp_token_id
+        pos["Hedge_Order_Id"] = hedge_order_id
+        pos["Hedge_Timestamp_Sec"] = now_ts
+        pos["Hedge_Limit_Buy_Price"] = hedge_limit_buy
+        pos["Hedge_Quantity"] = hedge_qty
+        pos["Hedge_Buy_Price"] = hedge_fill_price
+        pos["Updated_At"] = now_dt
+
+        # In Dry-Run / Simulation mode: Instant Fill
+        if not self.live_strategy or not self.live_strategy.clob_client:
+            return self._finalize_hedged_locked(pos, hedge_fill_price, hedge_qty, hedge_order_id)
+
+        # In Live Mode: Dispatch Buy Order on CLOB for Opposite Token
+        try:
             try:
-                try:
-                    from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
-                except ImportError:
-                    from py_clob_client.clob_types import OrderArgs, OrderType
+                from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
+            except ImportError:
+                from py_clob_client.clob_types import OrderArgs, OrderType
 
-                order_args = OrderArgs(
-                    price=hedge_limit_buy,
-                    size=hedge_qty,
-                    side="BUY",
-                    token_id=opp_token_id
-                )
+            order_args = OrderArgs(
+                price=hedge_limit_buy,
+                size=hedge_qty,
+                side="BUY",
+                token_id=opp_token_id
+            )
+            logger.info(
+                f"🛡 [SYNTHETIC HEDGE DISPATCH] Submitting Buy Order for Opposite Token {opp_token_id[:8]}... "
+                f"Price=${hedge_limit_buy:.4f} | Qty={hedge_qty:.4f}"
+            )
+            signed_order = self.live_strategy.clob_client.create_order(order_args)
+            resp = self.live_strategy.clob_client.post_order(signed_order, OrderType.GTC)
+
+            if isinstance(resp, dict):
+                hedge_order_id = resp.get("orderID") or resp.get("orderId") or hedge_order_id
+                pos["Hedge_Order_Id"] = hedge_order_id
+            elif isinstance(resp, str) and resp.startswith("0x"):
+                hedge_order_id = resp
+                pos["Hedge_Order_Id"] = hedge_order_id
+
+            # Check if immediately matched on response
+            return self._evaluate_pending_hedge(current_bid, current_ask)
+
+        except Exception as e:
+            logger.error(f"⚠ Failed to post Live Synthetic Hedge Order: {e}.")
+            # Pre-Sell Bounce Check on immediate error
+            latest_bid = current_bid or current_ask or 0.0
+            if latest_bid > sl_price:
                 logger.info(
-                    f"🛡 [SYNTHETIC HEDGE DISPATCH] Submitting Buy Order for Opposite Token {opp_token_id[:8]}... "
-                    f"Price=${hedge_limit_buy:.4f} | Qty={hedge_qty:.4f}"
+                    f"💚 [BOUNCE RECOVERY DETECTED] Primary price (${latest_bid:.4f}) recovered "
+                    f"above SL (${sl_price:.4f}) after hedge error. Holding off direct sell & resuming OPEN position."
                 )
-                signed_order = self.live_strategy.clob_client.create_order(order_args)
-                resp = self.live_strategy.clob_client.post_order(signed_order, OrderType.GTC)
+                pos["Position_Status"] = "OPEN"
+                pos["Hedge_Order_Id"] = None
+                return pos
+            else:
+                logger.warning(
+                    f"🚨 [EMERGENCY DIRECT SELL] Primary price (${latest_bid:.4f}) is still <= SL "
+                    f"(${sl_price:.4f}). Liquidating primary position immediately."
+                )
+                return self._execute_direct_sell_liquidation(pos, current_bid, current_ask)
 
-                if isinstance(resp, dict):
-                    hedge_order_id = resp.get("orderID") or resp.get("orderId") or hedge_order_id
-                elif isinstance(resp, str) and resp.startswith("0x"):
-                    hedge_order_id = resp
-            except Exception as e:
-                logger.error(f"⚠ Failed to post Live Synthetic Hedge Order: {e}. Maintaining locked state.")
+    def _evaluate_pending_hedge(
+        self,
+        current_bid: Optional[float],
+        current_ask: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Monitors PENDING_HEDGE order for fill confirmation on exchange within a 2.0s timeout window.
+        If timeout is exceeded, cancels hedge order and checks for price bounce before direct liquidation.
+        """
+        pos = self.active_position
+        if not pos or pos.get("Position_Status") != "PENDING_HEDGE":
+            return None
 
+        now_sec = time.time()
+        enqueued_sec = pos.get("Hedge_Timestamp_Sec", now_sec)
+        elapsed_sec = now_sec - enqueued_sec
+        hedge_order_id = pos.get("Hedge_Order_Id")
+        opp_token_id = pos.get("Hedge_Token_Id")
+        hedge_qty = pos.get("Hedge_Quantity", 7.0)
+        hedge_fill_price = pos.get("Hedge_Buy_Price", 0.35)
+        sl_price = pos.get("Stop_Loss_Price", 0.65)
+
+        # 1. Check if hedge order filled on exchange or tokens exist in wallet
+        size_matched = 0.0
+        if self.live_strategy and self.live_strategy.clob_client:
+            if opp_token_id:
+                tok_bal = self.live_strategy.get_token_balance(opp_token_id)
+                if tok_bal >= 0.5:
+                    size_matched = max(size_matched, tok_bal)
+
+            if hedge_order_id and not str(hedge_order_id).startswith("HEDGE_"):
+                order_info = self.live_strategy.get_order_from_exchange(hedge_order_id)
+                if order_info and isinstance(order_info, dict):
+                    matched = round(float(order_info.get("sizeMatched") or order_info.get("size_matched") or 0.0), 4)
+                    status_up = str(order_info.get("status", "")).upper()
+                    if matched > 0 or status_up in ("MATCHED", "FILLED", "CLOSED"):
+                        size_matched = max(size_matched, matched if matched > 0 else hedge_qty)
+        else:
+            # Simulation mode: fills immediately
+            size_matched = hedge_qty
+
+        if size_matched > 0:
+            return self._finalize_hedged_locked(pos, hedge_fill_price, size_matched, hedge_order_id)
+
+        # 2. 2.0-Second Timeout Exceeded: Cancel hedge order & execute Pre-Sell Bounce Check
+        if elapsed_sec >= 2.0:
+            logger.warning(f"⏰ [HEDGE ORDER TIMEOUT] Hedge buy order unfilled after {elapsed_sec:.1f}s. Cancelling order...")
+            if self.live_strategy and hedge_order_id and not str(hedge_order_id).startswith("HEDGE_"):
+                self.cancel_order_on_exchange(hedge_order_id)
+
+            latest_bid = current_bid or current_ask or 0.0
+            if latest_bid > sl_price:
+                logger.info(
+                    f"💚 [BOUNCE RECOVERY DETECTED AFTER TIMEOUT] Primary price (${latest_bid:.4f}) recovered "
+                    f"above SL (${sl_price:.4f}). Holding off direct sell & resuming OPEN position."
+                )
+                pos["Position_Status"] = "OPEN"
+                pos["Hedge_Order_Id"] = None
+                return pos
+            else:
+                logger.warning(
+                    f"🚨 [EMERGENCY DIRECT SELL AFTER TIMEOUT] Primary price (${latest_bid:.4f}) is still <= SL "
+                    f"(${sl_price:.4f}). Liquidating primary position immediately."
+                )
+                return self._execute_direct_sell_liquidation(pos, current_bid, current_ask)
+
+        return None
+
+    def _finalize_hedged_locked(
+        self,
+        pos: Dict[str, Any],
+        hedge_fill_price: float,
+        hedge_qty: float,
+        hedge_order_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """
+        Transitions position to HEDGED_LOCKED, calculates predetermined locked PnL,
+        and saves updates to SQLite and Telegram.
+        """
+        now_ts = time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        filled_qty = float(pos.get("Filled_Quantity") or pos.get("Target_Quantity") or hedge_qty)
         entry_price = float(pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price") or 0.70)
         primary_cost = round(filled_qty * entry_price, 4)
         hedge_cost = round(hedge_qty * hedge_fill_price, 4)
@@ -1494,7 +1615,6 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         locked_pnl = round(guaranteed_payout - total_cost, 4)
 
         pos["Position_Status"] = "HEDGED_LOCKED"
-        pos["Hedge_Token_Id"] = opp_token_id
         pos["Hedge_Buy_Price"] = hedge_fill_price
         pos["Hedge_Quantity"] = hedge_qty
         pos["Hedge_Order_Id"] = hedge_order_id
@@ -1505,7 +1625,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         logger.info(
             f"🛡 [SYNTHETIC STOP-LOSS LOCKED] Position transitioned to HEDGED_LOCKED: "
             f"Primary={pos.get('Position_Side')} (Qty={filled_qty:.2f} @ ${entry_price:.4f}) + "
-            f"Hedge={opp_token_id[:8]} (Qty={hedge_qty:.2f} @ ${hedge_fill_price:.4f}) | "
+            f"Hedge={pos.get('Hedge_Token_Id', '')[:8]} (Qty={hedge_qty:.2f} @ ${hedge_fill_price:.4f}) | "
             f"Locked PnL=${locked_pnl:+.4f} USDC | Zero Trading Downtime!"
         )
 
@@ -1520,11 +1640,11 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     Exit_Reason = 'SYNTHETIC_HEDGE_LOCK',
                     Pnl = ?,
                     Updated_At = ?
-                WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'OPEN');
+                WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'PENDING_HEDGE'));
             """
             self.async_writer.enqueue_write(
                 sql,
-                (opp_token_id, hedge_fill_price, hedge_qty, hedge_order_id, locked_pnl, now_dt, pos.get("Buy_Order_Id"), pos.get("Candle_Start"))
+                (pos.get("Hedge_Token_Id"), hedge_fill_price, hedge_qty, hedge_order_id, locked_pnl, now_dt, pos.get("Buy_Order_Id"), pos.get("Candle_Start"))
             )
 
         if self.notifier and getattr(config, "telegram_enabled", False):
@@ -1541,6 +1661,77 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             except Exception as e:
                 logger.debug(f"Failed to enqueue Telegram hedge notice: {e}")
 
+        return pos
+
+    def _execute_direct_sell_liquidation(
+        self,
+        pos: Dict[str, Any],
+        current_bid: Optional[float],
+        current_ask: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Executes emergency direct Limit Sell of the primary token as a fail-safe when synthetic hedge cannot be filled.
+        """
+        now_ts = time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Cancel any resting TP order
+        if pos.get("Tp_Order_Id"):
+            self.cancel_order_on_exchange(pos["Tp_Order_Id"])
+            pos["Tp_Order_Id"] = None
+
+        sl_price = pos.get("Stop_Loss_Price", 0.65)
+        entry_price = float(pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price") or 0.70)
+        filled_qty = float(pos.get("Filled_Quantity") or pos.get("Target_Quantity") or 7.0)
+
+        slippage = getattr(config, "v2_stop_loss_slippage_cents", 0.01)
+        effective_bid = current_bid if (current_bid is not None and current_bid > 0) else sl_price
+        limit_sell_price = round(max(0.01, min(sl_price, effective_bid) - slippage), 4)
+
+        sell_order_id = f"V3_EMERGENCY_SL_{int(now_ts*1000)}"
+        if self.live_strategy and self.live_strategy.clob_client and pos.get("Token_Id"):
+            sl_resp = self.live_strategy.post_limit_sell(pos["Token_Id"], limit_sell_price, filled_qty)
+            if sl_resp and isinstance(sl_resp, dict) and ("orderID" in sl_resp or "orderId" in sl_resp):
+                sell_order_id = sl_resp.get("orderID") or sl_resp.get("orderId")
+
+        pnl = round((limit_sell_price - entry_price) * filled_qty, 4)
+
+        pos["Position_Status"] = "CLOSING"
+        pos["Sell_Limit_Price"] = limit_sell_price
+        pos["Sell_Quantity"] = filled_qty
+        pos["Sell_Order_Id"] = sell_order_id
+        pos["Exit_Timestamp"] = now_dt
+        pos["Exit_Price"] = limit_sell_price
+        pos["Exit_Reason"] = "EMERGENCY_DIRECT_SL"
+        pos["Trade_Outcome"] = "LOSS" if limit_sell_price < entry_price else "WIN"
+        pos["Pnl"] = pnl
+        pos["Closing_Timestamp_Sec"] = now_ts
+        pos["Updated_At"] = now_dt
+
+        logger.warning(
+            f"🚨 [EMERGENCY DIRECT SELL DISPATCHED] Side={pos.get('Position_Side')} | "
+            f"Price=${limit_sell_price:.4f} | Qty={filled_qty:.2f} | PnL=${pnl:+.4f}"
+        )
+
+        if self.async_writer:
+            sql = """
+                UPDATE Positions SET
+                    Position_Status = 'CLOSING',
+                    Exit_Price = ?,
+                    Exit_Reason = 'EMERGENCY_DIRECT_SL',
+                    Trade_Outcome = ?,
+                    Sell_Order_Id = ?,
+                    Sell_Quantity = ?,
+                    Pnl = ?,
+                    Updated_At = ?
+                WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status IN ('OPEN', 'PENDING_HEDGE'));
+            """
+            self.async_writer.enqueue_write(
+                sql,
+                (limit_sell_price, pos["Trade_Outcome"], sell_order_id, filled_qty, pnl, now_dt, pos.get("Buy_Order_Id"), pos.get("Candle_Start"))
+            )
+
+        self._evaluate_closing_position(current_bid, current_ask)
         return pos
 
     def _close_expired_position(self, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
@@ -1961,4 +2152,4 @@ class LiveExecutionStrategy(IExecutionStrategy):
         current_ask: Optional[float],
         opposite_token_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        return self.dry_strategy.process_tick(candle_start, slug, side, token_id, current_bid, current_ask)
+        return self.dry_strategy.process_tick(candle_start, slug, side, token_id, current_bid, current_ask, opposite_token_id)

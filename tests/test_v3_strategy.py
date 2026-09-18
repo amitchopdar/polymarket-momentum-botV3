@@ -456,6 +456,235 @@ def test_v3_timeout_cancel_match_and_token_balance_recovery(memory_db):
     assert strat.dry_strategy.active_position is None
 
 
+def test_v3_synthetic_hedge_instant_fill(memory_db):
+    strat = V2OddsMomentumStrategy(async_writer=None)
+    candle_start = "2026-09-18 11:00:00"
+    slug = "btc-updown-5m-1789716000"
+    token_up = "TOK_UP_HEDGE"
+    token_dn = "TOK_DN_HEDGE"
+
+    # Setup an OPEN position on UP
+    strat.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.70,
+        "Average_Fill_Price": 0.70,
+        "Target_Quantity": 7.0,
+        "Filled_Quantity": 7.0,
+        "Take_Profit_Price": 0.90,
+        "Stop_Loss_Price": 0.63,
+        "High_Water_Mark": 0.70,
+        "Tp_Order_Id": "0xTP_RESTING_123",
+        "Order_Timestamp_Sec": time.time(),
+    }
+
+    # Price drops to $0.62 <= SL $0.63
+    strat.process_tick(candle_start, slug, "UP", token_up, 0.61, 0.62)
+
+    # Position must transition to HEDGED_LOCKED
+    pos = strat.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "HEDGED_LOCKED"
+    assert pos["Hedge_Token_Id"] == token_dn
+    assert pos["Hedge_Quantity"] == 7.0
+    assert pos["Hedge_Buy_Price"] == 0.37  # 1.00 - 0.63
+    # PnL = (1.00 * 7.0) - (0.70 * 7.0 + 0.37 * 7.0) = 7.0 - (4.90 + 2.59) = 7.0 - 7.49 = -0.49
+    assert pos["Pnl"] == -0.49
+    assert pos["Exit_Reason"] == "SYNTHETIC_HEDGE_LOCK"
+
+
+def test_v3_synthetic_hedge_rejection_with_bounce(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 11:05:00"
+    slug = "btc-updown-5m-1789716300"
+    token_up = "TOK_UP_REJ_BOUNCE"
+    token_dn = "TOK_DN_REJ_BOUNCE"
+
+    # Setup OPEN position
+    pos = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.70,
+        "Average_Fill_Price": 0.70,
+        "Target_Quantity": 7.0,
+        "Filled_Quantity": 7.0,
+        "Take_Profit_Price": 0.90,
+        "Stop_Loss_Price": 0.63,
+        "High_Water_Mark": 0.70,
+        "Tp_Order_Id": "0xTP_RESTING_REJ",
+        "Order_Timestamp_Sec": time.time(),
+    }
+    strat.dry_strategy.active_position = pos
+
+    # Simulate CLOB error on hedge buy dispatch
+    mock_clob.create_order.return_value = {"signed": True}
+    mock_clob.post_order.side_effect = Exception("HTTP 400 Bad Request: order size below min tick")
+
+    # Primary token price bounced back to Bid $0.66 > SL $0.63
+    res = strat.dry_strategy.execute_synthetic_hedge_exit(pos, current_bid=0.66, current_ask=0.67)
+
+    # Position must NOT be liquidated; it must bounce back to OPEN!
+    assert res is not None
+    assert res["Position_Status"] == "OPEN"
+    assert res["Hedge_Order_Id"] is None
+
+
+def test_v3_synthetic_hedge_rejection_without_bounce(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 11:10:00"
+    slug = "btc-updown-5m-1789716600"
+    token_up = "TOK_UP_REJ_NOBOUNCE"
+    token_dn = "TOK_DN_REJ_NOBOUNCE"
+
+    pos = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.70,
+        "Average_Fill_Price": 0.70,
+        "Target_Quantity": 7.0,
+        "Filled_Quantity": 7.0,
+        "Take_Profit_Price": 0.90,
+        "Stop_Loss_Price": 0.63,
+        "High_Water_Mark": 0.70,
+        "Tp_Order_Id": "0xTP_RESTING_NOB",
+        "Order_Timestamp_Sec": time.time(),
+    }
+    strat.dry_strategy.active_position = pos
+
+    mock_clob.create_order.return_value = {"signed": True}
+    mock_clob.post_order.side_effect = Exception("HTTP 500 Network Error")
+
+    # Primary token price still <= SL ($0.60 <= $0.63)
+    res = strat.dry_strategy.execute_synthetic_hedge_exit(pos, current_bid=0.60, current_ask=0.61)
+
+    # Strategy must execute EMERGENCY_DIRECT_SL and transition to CLOSING
+    assert res is not None
+    assert res["Position_Status"] == "CLOSING"
+    assert res["Exit_Reason"] == "EMERGENCY_DIRECT_SL"
+
+
+def test_v3_synthetic_hedge_timeout_with_bounce(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 11:15:00"
+    slug = "btc-updown-5m-1789716900"
+    token_up = "TOK_UP_TO_BOUNCE"
+    token_dn = "TOK_DN_TO_BOUNCE"
+
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "PENDING_HEDGE",
+        "Target_Buy_Price": 0.70,
+        "Average_Fill_Price": 0.70,
+        "Target_Quantity": 7.0,
+        "Filled_Quantity": 7.0,
+        "Take_Profit_Price": 0.90,
+        "Stop_Loss_Price": 0.63,
+        "Hedge_Token_Id": token_dn,
+        "Hedge_Order_Id": "0xHEDGE_UNFILLED_1",
+        "Hedge_Timestamp_Sec": now_sec - 2.5,  # 2.5s elapsed (> 2.0s timeout)
+        "Hedge_Quantity": 7.0,
+        "Hedge_Buy_Price": 0.37,
+    }
+
+    # Hedge order unfilled and 0 balance
+    mock_clob.get_balance_allowance.return_value = {"balance": "0"}
+    mock_clob.get_order.return_value = {"status": "OPEN", "size_matched": "0.0"}
+
+    # Primary token bounced up to Bid $0.68 > SL $0.63
+    strat.process_tick(candle_start, slug, "UP", token_up, 0.68, 0.69)
+
+    # Strategy must cancel hedge order and revert position to OPEN!
+    mock_clob.cancel_orders.assert_called()
+    pos = strat.dry_strategy.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "OPEN"
+    assert pos["Hedge_Order_Id"] is None
+
+
+def test_v3_synthetic_hedge_timeout_without_bounce(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 11:20:00"
+    slug = "btc-updown-5m-1789717200"
+    token_up = "TOK_UP_TO_NOBOUNCE"
+    token_dn = "TOK_DN_TO_NOBOUNCE"
+
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_up,
+        "Opposite_Token_Id": token_dn,
+        "Position_Side": "UP",
+        "Position_Status": "PENDING_HEDGE",
+        "Target_Buy_Price": 0.70,
+        "Average_Fill_Price": 0.70,
+        "Target_Quantity": 7.0,
+        "Filled_Quantity": 7.0,
+        "Take_Profit_Price": 0.90,
+        "Stop_Loss_Price": 0.63,
+        "Hedge_Token_Id": token_dn,
+        "Hedge_Order_Id": "0xHEDGE_UNFILLED_2",
+        "Hedge_Timestamp_Sec": now_sec - 2.5,  # 2.5s elapsed (> 2.0s timeout)
+        "Hedge_Quantity": 7.0,
+        "Hedge_Buy_Price": 0.37,
+    }
+
+    mock_clob.get_balance_allowance.return_value = {"balance": "0"}
+    mock_clob.get_order.return_value = {"status": "OPEN", "size_matched": "0.0"}
+
+    # Primary token still <= SL ($0.58 <= $0.63)
+    strat.process_tick(candle_start, slug, "UP", token_up, 0.58, 0.59)
+
+    # Strategy must cancel hedge order and execute emergency direct sell
+    mock_clob.cancel_orders.assert_called()
+    pos = strat.dry_strategy.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "CLOSING"
+    assert pos["Exit_Reason"] == "EMERGENCY_DIRECT_SL"
+
+
+
 
 
 
