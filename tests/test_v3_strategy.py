@@ -479,3 +479,119 @@ def test_v3_share_based_sizing():
     assert pos["Target_Quantity"] == 12.5
     # Spend USD = 12.5 * 0.71 = 8.875
     assert pos["Target_Buy_Price"] == 0.71
+
+
+
+def test_v3_candle_rollover_deadlock_unlocked_cleanly():
+    """
+    Verifies that when a 5m candle boundary elapses, an active filled position
+    is cleanly closed and active_position is set to None, unlocking the bot
+    to trade the new candle without infinite loops or REST spam.
+    """
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_1 = "2026-09-18 20:00:00"
+    candle_2 = "2026-09-18 20:05:00"
+    slug_1 = "btc-updown-5m-1789747200"
+    slug_2 = "btc-updown-5m-1789747500"
+    token_1 = "TOK_CANDLE_1"
+    token_2 = "TOK_CANDLE_2"
+
+    now_sec = time.time()
+    # Position from Candle 1 is active with 5.0 filled shares
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_1,
+        "Slug": slug_1,
+        "Token_Id": token_1,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.66,
+        "Average_Fill_Price": 0.66,
+        "Target_Quantity": 5.0,
+        "Filled_Quantity": 5.0,
+        "Take_Profit_Price": 0.86,
+        "Stop_Loss_Price": 0.56,
+        "High_Water_Mark": 0.66,
+        "Tp_Order_Id": "0xTP_RESTING_123",
+        "Tp_Qty": 5.0,
+        "Buy_Order_Id": "0xBUY_FILLED_123",
+        "Order_Timestamp_Sec": now_sec - 290,
+    }
+
+    # Exchange mocks: cancel resting orders, buy order confirms 5.0 filled
+    mock_clob.get_order.return_value = {"status": "FILLED", "size_matched": "5.0"}
+    mock_clob.cancel_orders.return_value = {"canceled": ["0xTP_RESTING_123"], "not_canceled": {}}
+
+    # Tick for Candle 2 arrives
+    strat.process_tick(candle_2, slug_2, "UP", token_2, 0.70, 0.71)
+
+    # Active position MUST be None! Unlocked for candle 2!
+    assert strat.dry_strategy.active_position is None
+
+
+def test_v3_sl_trigger_recognizes_resting_tp_already_matched():
+    """
+    Verifies that when market drops towards SL, but the resting TP order was ALREADY
+    matched on Polymarket CLOB, the bot recognizes the 'already canceled or matched'
+    notice, marks the trade as TAKE_PROFIT WIN, and does NOT dispatch an SL order.
+    """
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 19:55:00"
+    slug = "btc-updown-5m-1789746900"
+    token_id = "TOK_TP_MATCHED"
+
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_id,
+        "Position_Side": "UP",
+        "Position_Status": "OPEN",
+        "Target_Buy_Price": 0.66,
+        "Average_Fill_Price": 0.66,
+        "Target_Quantity": 5.0,
+        "Filled_Quantity": 5.0,
+        "Take_Profit_Price": 0.86,
+        "Stop_Loss_Price": 0.76,
+        "High_Water_Mark": 0.86,
+        "Tp_Order_Id": "0xTP_RESTING_MATCHED",
+        "Tp_Qty": 5.0,
+        "Buy_Order_Id": "0xBUY_123",
+        "Order_Timestamp_Sec": now_sec,
+    }
+
+    # Cancel order returns Polymarket's exact response when already matched
+    mock_clob.cancel_orders.return_value = {
+        "canceled": [],
+        "not_canceled": {
+            "0xTP_RESTING_MATCHED": "CLOB: order can't be found - already canceled or matched"
+        }
+    }
+    # get_order confirms TP order filled
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "5.0",
+        "price": "0.8600",
+        "makingAmount": "5.0",
+        "takingAmount": "4.30"
+    }
+
+    # Price drops to $0.75 <= SL $0.76 -> SL trigger evaluates
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.75, 0.76)
+
+    # Bot must NOT post a new limit sell (post_order not called for SL)
+    mock_clob.post_order.assert_not_called()
+
+    # Position must be closed as a TAKE_PROFIT WIN, and active_position cleared!
+    assert strat.dry_strategy.active_position is None
