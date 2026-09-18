@@ -7,7 +7,7 @@ All sensitive credentials are read strictly from environment variables or .env f
 import os
 import logging
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Any
 
 try:
     from dotenv import load_dotenv
@@ -17,12 +17,32 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-def parse_int_list(raw: str) -> List[int]:
-    if not raw:
+def _clean_str(val: Any) -> str:
+    if val is None:
+        return ""
+    return str(val).strip("\"' \t\r\n")
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    try:
+        clean = _clean_str(val)
+        return int(clean) if clean else default
+    except Exception:
+        return default
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    try:
+        clean = _clean_str(val)
+        return float(clean) if clean else default
+    except Exception:
+        return default
+
+def parse_int_list(raw: Any) -> List[int]:
+    clean = _clean_str(raw)
+    if not clean:
         return []
     res = []
-    for item in raw.split(","):
-        item = item.strip()
+    for item in clean.split(","):
+        item = item.strip("\"' \t\r\n")
         if item.isdigit():
             res.append(int(item))
     return res
@@ -36,7 +56,7 @@ if os.path.exists(_env_file):
                 _line = _line.strip()
                 if _line and not _line.startswith("#") and "=" in _line:
                     _k, _v = _line.split("=", 1)
-                    _val = _v.strip().strip("\"' ")
+                    _val = _clean_str(_v)
                     os.environ.setdefault(_k.strip(), _val)
     except Exception:
         pass
@@ -60,7 +80,7 @@ USER_V2_MAX_POSITION_SIZE_USD = 5.0       # Max position size per trade ($5.00)
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
-USER_V3_MAKER_OFFSET_CENTS = 0.02         # 0 cents offset for instant execution
+USER_V3_MAKER_OFFSET_CENTS = 0.02         # 2 cents below best ask for Maker status (0.01 or 0.02)
 USER_V3_MAKER_ORDER_TIMEOUT_SEC = 5.0     # 5 seconds order cancellation timeout
 # ==============================================================================
 
@@ -72,12 +92,12 @@ class AppConfig:
     Personal sensitive credentials (Telegram tokens, wallet keys) are read EXCLUSIVELY from .env file.
     """
     # Environment & Mode Toggles
-    execution_mode: str = field(default_factory=lambda: os.getenv("EXECUTION_MODE", USER_EXECUTION_MODE).upper())
-    dry_run: bool = field(default_factory=lambda: os.getenv("EXECUTION_MODE", USER_EXECUTION_MODE).upper() == "DRY_RUN")
+    execution_mode: str = field(default_factory=lambda: _clean_str(os.getenv("EXECUTION_MODE", USER_EXECUTION_MODE)).upper())
+    dry_run: bool = field(default_factory=lambda: _clean_str(os.getenv("EXECUTION_MODE", USER_EXECUTION_MODE)).upper() == "DRY_RUN")
     trading_active: bool = True
     
     # Database Settings
-    db_path: str = os.getenv("DB_PATH", "PolyDB_V3.sqlite")
+    db_path: str = field(default_factory=lambda: _clean_str(os.getenv("DB_PATH", "PolyDB_V3.sqlite")) or "PolyDB_V3.sqlite")
     busy_timeout_ms: int = 30000
 
     # Polymarket Endpoint URLs
@@ -86,36 +106,39 @@ class AppConfig:
     polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
     # Polymarket Authentication
-    polymarket_api_key: str = field(default_factory=lambda: os.getenv("POLYMARKET_API_KEY", ""))
-    polymarket_secret: str = field(default_factory=lambda: os.getenv("POLYMARKET_SECRET", ""))
-    polymarket_passphrase: str = field(default_factory=lambda: os.getenv("POLYMARKET_PASSPHRASE", ""))
-    polymarket_private_key: str = field(default_factory=lambda: os.getenv("POLYMARKET_PRIVATE_KEY", ""))
-    polymarket_funder: str = field(default_factory=lambda: os.getenv("POLYMARKET_FUNDER", ""))
-    polymarket_signature_type: int = field(default_factory=lambda: int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "2" if os.getenv("POLYMARKET_FUNDER") else "0")))
+    polymarket_api_key: str = field(default_factory=lambda: _clean_str(os.getenv("POLYMARKET_API_KEY", "")))
+    polymarket_secret: str = field(default_factory=lambda: _clean_str(os.getenv("POLYMARKET_SECRET", "")))
+    polymarket_passphrase: str = field(default_factory=lambda: _clean_str(os.getenv("POLYMARKET_PASSPHRASE", "")))
+    polymarket_private_key: str = field(default_factory=lambda: _clean_str(os.getenv("POLYMARKET_PRIVATE_KEY", "")))
+    polymarket_funder: str = field(default_factory=lambda: _clean_str(os.getenv("POLYMARKET_FUNDER", "")))
+    polymarket_signature_type: int = field(default_factory=lambda: _safe_int(
+        os.getenv("POLYMARKET_SIGNATURE_TYPE"), 
+        3 if _clean_str(os.getenv("POLYMARKET_FUNDER")) else 0
+    ))
 
     # Telegram Credentials & Routing
-    telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
-    telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+    telegram_bot_token: str = field(default_factory=lambda: _clean_str(os.getenv("TELEGRAM_BOT_TOKEN", "")))
+    telegram_chat_id: str = field(default_factory=lambda: _clean_str(os.getenv("TELEGRAM_CHAT_ID", "")))
     telegram_authorized_user_ids: List[int] = field(default_factory=lambda: parse_int_list(os.getenv("TELEGRAM_AUTHORIZED_USER_IDS", "")))
-    telegram_enabled: bool = field(default_factory=lambda: bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")))
+    telegram_enabled: bool = field(default_factory=lambda: bool(_clean_str(os.getenv("TELEGRAM_BOT_TOKEN")) and _clean_str(os.getenv("TELEGRAM_CHAT_ID"))))
 
     # V2 / V3 Strategy Parameters
-    v2_momentum_threshold_cents: float = field(default_factory=lambda: float(os.getenv("V2_MOMENTUM_THRESHOLD_CENTS", str(USER_V2_MOMENTUM_THRESHOLD_CENTS))))
-    v2_momentum_window_sec: float = field(default_factory=lambda: float(os.getenv("V2_MOMENTUM_WINDOW_SEC", str(USER_V2_MOMENTUM_WINDOW_SEC))))
-    v2_take_profit_cents: float = field(default_factory=lambda: float(os.getenv("V2_TAKE_PROFIT_CENTS", str(USER_V2_TAKE_PROFIT_CENTS))))
-    v2_high_odds_cutoff: float = field(default_factory=lambda: float(os.getenv("V2_HIGH_ODDS_CUTOFF", str(USER_V2_HIGH_ODDS_CUTOFF))))
-    v2_high_odds_tp_target: float = field(default_factory=lambda: float(os.getenv("V2_HIGH_ODDS_TP_TARGET", str(USER_V2_HIGH_ODDS_TP_TARGET))))
-    v2_trailing_sl_enabled: bool = field(default_factory=lambda: os.getenv("V2_TRAILING_SL_ENABLED", str(USER_V2_TRAILING_SL_ENABLED)).lower() in ("true", "1", "yes"))
-    v2_trailing_sl_distance_cents: float = field(default_factory=lambda: float(os.getenv("V2_TRAILING_SL_DISTANCE_CENTS", str(USER_V2_TRAILING_SL_DISTANCE_CENTS))))
-    v2_stop_loss_slippage_cents: float = field(default_factory=lambda: float(os.getenv("V2_STOP_LOSS_SLIPPAGE_CENTS", str(USER_V2_STOP_LOSS_SLIPPAGE_CENTS))))
-    v2_min_entry_odds_floor: float = field(default_factory=lambda: float(os.getenv("V2_MIN_ENTRY_ODDS_FLOOR", str(USER_V2_MIN_ENTRY_ODDS_FLOOR))))
-    v2_max_entry_odds_ceiling: float = field(default_factory=lambda: float(os.getenv("V2_MAX_ENTRY_ODDS_CEILING", str(USER_V2_MAX_ENTRY_ODDS_CEILING))))
-    max_position_size_usd: float = field(default_factory=lambda: float(os.getenv("MAX_POSITION_SIZE_USD", str(USER_V2_MAX_POSITION_SIZE_USD))))
-    max_active_positions: int = field(default_factory=lambda: int(os.getenv("MAX_ACTIVE_POSITIONS", str(USER_V2_MAX_ACTIVE_POSITIONS))))
+    v2_momentum_threshold_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V2_MOMENTUM_THRESHOLD_CENTS"), USER_V2_MOMENTUM_THRESHOLD_CENTS))
+    v2_momentum_window_sec: float = field(default_factory=lambda: _safe_float(os.getenv("V2_MOMENTUM_WINDOW_SEC"), USER_V2_MOMENTUM_WINDOW_SEC))
+    v2_take_profit_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V2_TAKE_PROFIT_CENTS"), USER_V2_TAKE_PROFIT_CENTS))
+    v2_high_odds_cutoff: float = field(default_factory=lambda: _safe_float(os.getenv("V2_HIGH_ODDS_CUTOFF"), USER_V2_HIGH_ODDS_CUTOFF))
+    v2_high_odds_tp_target: float = field(default_factory=lambda: _safe_float(os.getenv("V2_HIGH_ODDS_TP_TARGET"), USER_V2_HIGH_ODDS_TP_TARGET))
+    v2_trailing_sl_enabled: bool = field(default_factory=lambda: _clean_str(os.getenv("V2_TRAILING_SL_ENABLED", str(USER_V2_TRAILING_SL_ENABLED))).lower() in ("true", "1", "yes"))
+    v2_trailing_sl_distance_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V2_TRAILING_SL_DISTANCE_CENTS"), USER_V2_TRAILING_SL_DISTANCE_CENTS))
+    v2_stop_loss_slippage_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V2_STOP_LOSS_SLIPPAGE_CENTS"), USER_V2_STOP_LOSS_SLIPPAGE_CENTS))
+    v2_min_entry_odds_floor: float = field(default_factory=lambda: _safe_float(os.getenv("V2_MIN_ENTRY_ODDS_FLOOR"), USER_V2_MIN_ENTRY_ODDS_FLOOR))
+    v2_max_entry_odds_ceiling: float = field(default_factory=lambda: _safe_float(os.getenv("V2_MAX_ENTRY_ODDS_CEILING"), USER_V2_MAX_ENTRY_ODDS_CEILING))
+    max_position_size_usd: float = field(default_factory=lambda: _safe_float(os.getenv("MAX_POSITION_SIZE_USD"), USER_V2_MAX_POSITION_SIZE_USD))
+    max_active_positions: int = field(default_factory=lambda: _safe_int(os.getenv("MAX_ACTIVE_POSITIONS"), USER_V2_MAX_ACTIVE_POSITIONS))
 
     # V3 Maker Configuration
-    v3_maker_offset_cents: float = field(default_factory=lambda: float(os.getenv("V3_MAKER_OFFSET_CENTS", str(USER_V3_MAKER_OFFSET_CENTS))))
-    v3_maker_order_timeout_sec: float = field(default_factory=lambda: float(os.getenv("V3_MAKER_ORDER_TIMEOUT_SEC", str(USER_V3_MAKER_ORDER_TIMEOUT_SEC))))
+    v3_maker_offset_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_MAKER_OFFSET_CENTS"), USER_V3_MAKER_OFFSET_CENTS))
+    v3_maker_order_timeout_sec: float = field(default_factory=lambda: _safe_float(os.getenv("V3_MAKER_ORDER_TIMEOUT_SEC"), USER_V3_MAKER_ORDER_TIMEOUT_SEC))
 
     # Risk Engine Guardrails
     max_daily_drawdown_pct: float = 0.15
