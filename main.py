@@ -82,7 +82,8 @@ class PolymarketBot:
 
         self.running = True
         self.async_writer.start()
-        self.settlement_tracker.start()
+        if hasattr(self, "settlement_tracker") and hasattr(self.settlement_tracker, "start"):
+            self.settlement_tracker.start()
 
         if getattr(config, "telegram_enabled", True):
             self.notifier.start()

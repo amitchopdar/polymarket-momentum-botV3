@@ -73,6 +73,17 @@ class SettlementTracker:
         with self._lock:
             return len(self._pending_positions)
 
+    def start(self) -> None:
+        """
+        Starts background resolution polling thread if not already running.
+        """
+        with self._lock:
+            self._running = True
+            if self._worker_thread is None or not self._worker_thread.is_alive():
+                self._worker_thread = threading.Thread(target=self._run_loop, daemon=True, name="SettlementTrackerThread")
+                self._worker_thread.start()
+                logger.info("✓ [SETTLEMENT TRACKER] Background resolution worker started (15s polling cycle).")
+
     def stop(self) -> None:
         self._running = False
 
