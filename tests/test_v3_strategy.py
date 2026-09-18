@@ -459,3 +459,23 @@ def test_v3_timeout_cancel_match_and_token_balance_recovery(memory_db):
 
 
 
+
+def test_v3_share_based_sizing():
+    """
+    Verifies that trade entry sizes by exact share count configured in config.trade_size_shares.
+    """
+    strat = V2OddsMomentumStrategy(async_writer=None)
+    candle_start = "2026-09-18 12:00:00"
+    slug = "btc-updown-5m-1789719600"
+    token_up = "TOK_UP_SHARE_TEST"
+
+    now_sec = time.time()
+    strat.tick_buffers[token_up] = [(now_sec - 10.0, 0.49, 0.50)]
+
+    config.trade_size_shares = 12.5
+
+    pos = strat.process_tick(candle_start, slug, "UP", token_up, 0.69, 0.70)
+    assert pos is not None
+    assert pos["Target_Quantity"] == 12.5
+    # Spend USD = 12.5 * 0.71 = 8.875
+    assert pos["Target_Buy_Price"] == 0.71

@@ -76,7 +76,8 @@ USER_V2_TRAILING_SL_DISTANCE_CENTS = 0.10 # Trailing SL distance from HWM (10 ce
 USER_V2_STOP_LOSS_SLIPPAGE_CENTS = 0.03   # Stop Loss exit slippage for Limit Sell orders (2 cents)
 USER_V2_MIN_ENTRY_ODDS_FLOOR = 0.60       # Minimum odds floor required for trade entry ($0.65 / 65 cents)
 USER_V2_MAX_ENTRY_ODDS_CEILING = 0.92     # Maximum odds ceiling limit for trade entry ($0.92 / 92 cents)
-USER_V2_MAX_POSITION_SIZE_USD = 5.0       # Max position size per trade ($5.00)
+USER_V3_TRADE_SIZE_SHARES = 5.0           # Number of shares to trade per signal (e.g. 5.0, 10.0, 20.0)
+USER_V2_MAX_POSITION_SIZE_USD = 5.0       # Fallback dollar value per trade ($5.00)
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
@@ -134,6 +135,7 @@ class AppConfig:
     v2_stop_loss_slippage_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V2_STOP_LOSS_SLIPPAGE_CENTS"), USER_V2_STOP_LOSS_SLIPPAGE_CENTS))
     v2_min_entry_odds_floor: float = field(default_factory=lambda: _safe_float(os.getenv("V2_MIN_ENTRY_ODDS_FLOOR"), USER_V2_MIN_ENTRY_ODDS_FLOOR))
     v2_max_entry_odds_ceiling: float = field(default_factory=lambda: _safe_float(os.getenv("V2_MAX_ENTRY_ODDS_CEILING"), USER_V2_MAX_ENTRY_ODDS_CEILING))
+    trade_size_shares: float = field(default_factory=lambda: _safe_float(os.getenv("TRADE_SIZE_SHARES") or os.getenv("MAX_POSITION_SIZE_SHARES"), USER_V3_TRADE_SIZE_SHARES))
     max_position_size_usd: float = field(default_factory=lambda: _safe_float(os.getenv("MAX_POSITION_SIZE_USD"), USER_V2_MAX_POSITION_SIZE_USD))
     max_active_positions: int = field(default_factory=lambda: _safe_int(os.getenv("MAX_ACTIVE_POSITIONS"), USER_V2_MAX_ACTIVE_POSITIONS))
 

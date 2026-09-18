@@ -480,9 +480,14 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
             limit_buy_price = round(min(0.9900, max(0.01, current_ask + buy_slippage)), 4)
-            pos_size_usd = getattr(config, "max_position_size_usd", 5.0)
-            raw_qty = round(pos_size_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
-            target_qty = max(5.0, raw_qty)
+            trade_shares = getattr(config, "trade_size_shares", 0.0)
+            if trade_shares and trade_shares > 0:
+                target_qty = float(trade_shares)
+                pos_size_usd = round(target_qty * limit_buy_price, 4)
+            else:
+                pos_size_usd = getattr(config, "max_position_size_usd", 5.0)
+                raw_qty = round(pos_size_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+                target_qty = max(5.0, raw_qty)
             now_sec = time.time()
             now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -681,7 +686,11 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         # Limit Buy Price is placed with slippage buffer above Best Ask for instant marketable execution
         limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
 
-        target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+        trade_shares = getattr(config, "trade_size_shares", 0.0)
+        if trade_shares and trade_shares > 0:
+            target_qty = float(trade_shares)
+        else:
+            target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
         buy_order_id = f"V3_MAKER_{int(now_ts*1000)}"
 
         pos = {
@@ -1609,8 +1618,13 @@ class LiveExecutionStrategy(IExecutionStrategy):
             buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
             entry_odds = current_ask or target_price
             limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
-            raw_qty = round(spend_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
-            target_qty = max(5.0, raw_qty)
+            trade_shares = getattr(config, "trade_size_shares", 0.0)
+            if trade_shares and trade_shares > 0:
+                target_qty = float(trade_shares)
+                spend_usd = round(target_qty * limit_buy_price, 4)
+            else:
+                raw_qty = round(spend_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+                target_qty = max(5.0, raw_qty)
 
             logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} (Ask + ${buy_slippage:.2f}) Qty={target_qty}")
             order_args = OrderArgs(
