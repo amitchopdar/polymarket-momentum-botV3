@@ -198,7 +198,7 @@ class TelegramCommandRouter:
             f"• <b>Buy Slippage Buffer:</b> <code>+${config.v3_buy_slippage_cents:.2f} (Instant Fill)</code>\n"
             f"• <b>Take Profit Target:</b> <code>+${config.v2_take_profit_cents:.2f}</code>\n"
             f"• <b>Trailing Stop Loss:</b> <code>-${config.v2_trailing_sl_distance_cents:.2f} (from Peak)</code>\n"
-            f"• <b>Max Position Size:</b> <code>${config.max_position_size_usd:.2f}</code>\n"
+            f"• <b>Trade Size:</b> <code>{getattr(config, 'trade_size_shares', 5.0):.1f} shares</code>\n"
             f"• <b>Active Positions:</b> <code>PENDING={pending_cnt} | OPEN={open_cnt} | CLOSED={closed_cnt}</code>\n\n"
             "💰 <b>LIFETIME PERFORMANCE</b>\n"
             f"• <b>Total Trades:</b> <code>{summary['total']}</code> (Closed: {summary['closed']})\n"
