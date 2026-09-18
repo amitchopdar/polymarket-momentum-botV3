@@ -17,11 +17,11 @@ except ImportError:
 # USER-FACING ADJUSTABLE PARAMETERS (Sprint 4: Bot V4 High-Odds Strategy)
 # ==============================================================================
 # Bot V4 High-Odds Trend Trigger Parameters
-USER_V4_ENTRY_ODDS_THRESHOLD = 0.89        # Enter BUY when UP or DOWN odds >= 84 cents ($0.84)
+USER_V4_ENTRY_ODDS_THRESHOLD = 0.88        # Enter BUY when UP or DOWN odds >= 84 cents ($0.84)
 USER_V4_MAX_ENTRY_ODDS_CEILING = 0.9      # Max entry odds ceiling (do not buy if price has already surged > 88 cents)
 USER_V4_TAKE_PROFIT_OFFSET_CENTS = 0.09    # Take Profit offset (+7 cents above entry price, e.g. 84¢ -> 91¢)
 USER_V4_TAKE_PROFIT_PRICE = 0.99           # Absolute Max Take Profit ceiling cap ($0.99)
-USER_V4_STOP_LOSS_PRICE = 0.7             # Trigger Stop Loss when odds drop <= 40 cents ($0.40)
+USER_V4_STOP_LOSS_PRICE = 0.6             # Trigger Stop Loss when odds drop <= 40 cents ($0.40)
 USER_V4_STOP_LOSS_SLIPPAGE_CENTS = 0.02    # 2 cents slippage discount for aggressive SL limit sell ($0.02)
 USER_V4_MAX_POSITION_SIZE_USD = 5.0        # Max position size per trade ($5.00 USDC)
 USER_V4_MAX_ACTIVE_POSITIONS = 1           # Single active position limit across bot (1 position)
