@@ -226,9 +226,9 @@ class TelegramCommandRouter:
             cursor.execute("SELECT Position_Status, COUNT(*) FROM Positions GROUP BY Position_Status;")
             rows = dict(cursor.fetchall())
             conn.close()
-            pending = rows.get("PENDING_FILL", 0) + rows.get("PENDING", 0) + rows.get("PENDING_HEDGE", 0)
-            open_pos = rows.get("OPEN", 0) + rows.get("PARTIALLY_CLOSED", 0) + rows.get("CLOSING", 0) + rows.get("HEDGED_LOCKED", 0)
-            closed = rows.get("CLOSED", 0) + rows.get("RESOLVED_SETTLED", 0)
+            pending = rows.get("PENDING_FILL", 0) + rows.get("PENDING", 0)
+            open_pos = rows.get("OPEN", 0) + rows.get("PARTIALLY_CLOSED", 0) + rows.get("CLOSING", 0)
+            closed = rows.get("CLOSED", 0)
             return pending, open_pos, closed
         except Exception:
             return 0, 0, 0
@@ -242,7 +242,7 @@ class TelegramCommandRouter:
             total_row = cursor.fetchone()
             total = total_row[0] if total_row and total_row[0] is not None else 0
 
-            cursor.execute("SELECT Pnl FROM Positions WHERE Position_Status IN ('CLOSED', 'HEDGED_LOCKED', 'RESOLVED_SETTLED');")
+            cursor.execute("SELECT Pnl FROM Positions WHERE Position_Status = 'CLOSED';")
             pnls = []
             for r in cursor.fetchall():
                 if r[0] is not None and str(r[0]).lower() != "null":

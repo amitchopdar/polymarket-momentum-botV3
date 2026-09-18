@@ -77,12 +77,6 @@ class TelegramNotifier:
             return
         self.msg_queue.put(html_text)
 
-    def enqueue_notification(self, html_text: str) -> None:
-        """
-        Alias for send_message to support async notification enqueuing.
-        """
-        self.send_message(html_text)
-
     def _worker_loop(self) -> None:
         while self.running:
             try:
@@ -152,7 +146,7 @@ class TelegramNotifier:
             f"• <b>Side:</b> <code>{side}</code>\n"
             f"• <b>Fill Price:</b> <code>${fill_price:.2f}</code>\n"
             f"• <b>Shares:</b> <code>{qty}</code> (Spend: ${tx_usd:.2f})\n"
-            f"• <b>Automated Stop-Loss:</b> <code>${getattr(config, 'stop_loss_price', 0.65):.2f}</code>"
+            f"• <b>Automated Stop-Loss:</b> <code>${config.stop_loss_price:.2f}</code>"
         )
         self.send_message(text)
 

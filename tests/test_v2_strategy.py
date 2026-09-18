@@ -41,10 +41,9 @@ def test_v2_max_entry_odds_ceiling_filter(memory_db):
     slug = "btc-updown-5m-1785517200"
     now_sec = time.time()
 
-    # Signal exceeding ceiling (Surge +0.16 >= 0.15, but Ask > ceiling) -> NO TRADE
-    ceiling = getattr(config, "v2_max_entry_odds_ceiling", 0.95)
+    # Signal at $0.94 (Surge +0.16 >= 0.15, but Ask $0.94 > $0.92 ceiling) -> NO TRADE
     strat.tick_buffers["TOK_CEILING"] = [(now_sec - 10.0, 0.70, 0.71)]
-    pos_ceiling = strat.process_tick(candle_start, slug, "UP", "TOK_CEILING", ceiling, ceiling + 0.01)
+    pos_ceiling = strat.process_tick(candle_start, slug, "UP", "TOK_CEILING", 0.93, 0.94)
     assert pos_ceiling is None
 
 def test_v2_momentum_trigger_and_tp_sl_calculation(memory_db):
