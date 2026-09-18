@@ -389,5 +389,73 @@ def test_v3_db_persistence_and_telegram_pnl_summary(tmp_path):
     async_writer.stop()
 
 
+def test_v3_timeout_cancel_match_and_token_balance_recovery(memory_db):
+    from unittest.mock import MagicMock
+    from src.execution.strategy import LiveExecutionStrategy
+
+    strat = LiveExecutionStrategy(async_writer=None, notifier=None)
+    mock_clob = MagicMock()
+    strat.clob_client = mock_clob
+
+    candle_start = "2026-09-18 10:05:00"
+    slug = "btc-updown-5m-1789712700"
+    token_id = "TOK_MATCHED_AT_TIMEOUT"
+
+    # Setup PENDING_FILL position whose 5.0s timeout is triggered
+    now_sec = time.time()
+    strat.dry_strategy.active_position = {
+        "Candle_Start": candle_start,
+        "Slug": slug,
+        "Token_Id": token_id,
+        "Position_Side": "UP",
+        "Position_Status": "PENDING_FILL",
+        "Target_Buy_Price": 0.72,
+        "Target_Quantity": 6.9444,
+        "Filled_Quantity": 0.0,
+        "Buy_Order_Id": "0xb43cd9ce73ffde2a5299ce9d1693ef81a3f711f10488421f01030025dbaf9dd0",
+        "Order_Timestamp_Sec": now_sec - 5.2, # 5.2s elapsed!
+    }
+
+    # 1. Simulate exact Polymarket cancel response: "order can't be found - already canceled or matched"
+    mock_clob.cancel_orders.return_value = {
+        "canceled": [],
+        "not_canceled": {
+            "0xb43cd9ce73ffde2a5299ce9d1693ef81a3f711f10488421f01030025dbaf9dd0": "order can't be found - already canceled or matched"
+        }
+    }
+    # get_order returns empty or delayed data
+    mock_clob.get_order.return_value = {"status": "CANCELED", "size_matched": "0.0"}
+    # BUT get_balance_allowance confirms user holds 6.9444 shares!
+    mock_clob.get_balance_allowance.return_value = {"balance": "6944400", "allowance": "10000000"}
+
+    # Tick arrives at timeout boundary
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.71, 0.72)
+
+    # Position MUST NOT be CANCELLED/abandoned; it MUST be transitioned to OPEN with Stop Loss active!
+    pos = strat.dry_strategy.active_position
+    assert pos is not None
+    assert pos["Position_Status"] == "OPEN"
+    assert pos["Filled_Quantity"] == 6.9444
+    assert pos["Average_Fill_Price"] == 0.7200
+    assert pos["Stop_Loss_Price"] == 0.6200  # 0.72 - 0.10 trailing SL
+
+    # 2. Price crashes to $0.60 <= Stop Loss $0.62 -> Stop Loss MUST trigger!
+    mock_clob.post_order.return_value = {"orderID": "0xSL_EXIT_999"}
+    mock_clob.get_order.return_value = {
+        "status": "FILLED",
+        "size_matched": "6.9444",
+        "makingAmount": "6.9444",
+        "takingAmount": "4.1666", # Real exit price = 4.1666 / 6.9444 = 0.6000
+    }
+    # Once sold, exchange token balance becomes 0
+    mock_clob.get_balance_allowance.return_value = {"balance": "0"}
+
+    strat.process_tick(candle_start, slug, "UP", token_id, 0.59, 0.60)
+
+    # Position is successfully closed at Stop Loss and cleared!
+    assert strat.dry_strategy.active_position is None
+
+
+
 
 

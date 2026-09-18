@@ -398,10 +398,10 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         # Single Active Position Guard across the bot
         self.active_position: Optional[Dict[str, Any]] = None
 
-    def cancel_order_on_exchange(self, buy_order_id: str) -> bool:
+    def cancel_order_on_exchange(self, buy_order_id: str) -> Dict[str, Any]:
         if self.live_strategy and hasattr(self.live_strategy, "cancel_order_on_exchange"):
             return self.live_strategy.cancel_order_on_exchange(buy_order_id)
-        return True
+        return {"success": True, "matched": False, "reason": ""}
 
     def process_tick(
         self,
@@ -445,7 +445,65 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if self.active_position and self.active_position.get("Position_Status") == "OPEN" and self.active_position.get("Token_Id") == token_id:
             self._evaluate_tp_sl_exit(current_bid or current_ask, current_ask)
 
-        # 4. Single Position / Order Guard: Reject new entry if an active position is PENDING_FILL, OPEN, or CLOSING
+        # 4. Live Token Holding Check: If no active position in memory, check if wallet already holds tokens for this candle
+        if self.active_position is None and self.live_strategy and hasattr(self.live_strategy, "get_token_balance") and token_id:
+            tok_bal = self.live_strategy.get_token_balance(token_id)
+            if tok_bal >= 0.5:
+                eff_p = current_bid or current_ask
+                hwm = eff_p or 0.70
+                trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
+                stop_loss_price = round(max(0.01, hwm - trailing_dist), 4)
+                take_profit_price = round(min(0.9900, hwm + getattr(config, "v2_take_profit_cents", 0.20)), 4)
+                now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+                recovered_pos = {
+                    "Candle_Start": candle_start,
+                    "Slug": slug,
+                    "Token_Id": token_id,
+                    "Position_Side": side,
+                    "Entry_Timestamp": now_dt,
+                    "Order_Timestamp_Sec": now_sec,
+                    "Trigger_Odds_10s_Ago": eff_p,
+                    "Entry_Odds": eff_p,
+                    "Target_Buy_Price": eff_p,
+                    "Target_Quantity": tok_bal,
+                    "Filled_Quantity": tok_bal,
+                    "Sell_Quantity": 0.0,
+                    "Average_Fill_Price": eff_p,
+                    "Take_Profit_Price": take_profit_price,
+                    "Stop_Loss_Price": stop_loss_price,
+                    "High_Water_Mark": hwm,
+                    "Buy_Order_Id": f"RECOVERED_{token_id[:8]}_{int(now_sec)}",
+                    "Position_Status": "OPEN",
+                    "Pnl": 0.0,
+                    "Updated_At": now_dt
+                }
+                self.active_position = recovered_pos
+                logger.warning(
+                    f"🛡 [LIVE POSITION RECOVERY] Detected {tok_bal:.4f} open shares for token {token_id[:8]} on exchange! "
+                    f"Adopting into active tracking: TP=${take_profit_price:.4f} | SL=${stop_loss_price:.4f}"
+                )
+                if self.async_writer:
+                    sql = """
+                        INSERT INTO Positions (
+                            Candle_Start, Slug, Token_Id, Position_Side, Entry_Timestamp,
+                            Trigger_Odds_10s_Ago, Entry_Odds, Target_Buy_Price, Average_Fill_Price,
+                            Target_Quantity, Filled_Quantity, Take_Profit_Price, Stop_Loss_Price,
+                            High_Water_Mark, Buy_Order_Id, Position_Status, Pnl, Updated_At
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    """
+                    self.async_writer.enqueue_write(
+                        sql,
+                        (
+                            candle_start, slug, token_id, side, now_dt,
+                            eff_p, eff_p, eff_p, eff_p,
+                            tok_bal, tok_bal, take_profit_price, stop_loss_price,
+                            hwm, recovered_pos["Buy_Order_Id"], "OPEN", 0.0, now_dt
+                        )
+                    )
+                return recovered_pos
+
+        # 5. Single Position / Order Guard: Reject new entry if an active position is PENDING_FILL, OPEN, or CLOSING
         if self.active_position is not None:
             return None
 
@@ -770,10 +828,13 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         # 1. FETCH EXACT FILLED QUANTITY & REAL FILL PRICE DIRECTLY FROM POLYMARKET EXCHANGE
         size_matched = 0.0
         real_fill_price = None
-        if self.live_strategy and self.live_strategy.clob_client and buy_order_id:
+        if self.live_strategy and self.live_strategy.clob_client and buy_order_id and not str(buy_order_id).startswith("V3_"):
             order_info = self.live_strategy.get_order_from_exchange(buy_order_id)
             if order_info and isinstance(order_info, dict):
                 size_matched = round(float(order_info.get("sizeMatched") or order_info.get("size_matched") or 0.0), 4)
+                status_up = str(order_info.get("status", "")).upper()
+                if size_matched <= 0 and status_up in ("MATCHED", "FILLED", "CLOSED"):
+                    size_matched = target_qty
 
                 making = float(order_info.get("makingAmount") or order_info.get("making_amount") or 0.0)
                 taking = float(order_info.get("takingAmount") or order_info.get("taking_amount") or 0.0)
@@ -791,6 +852,11 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                             real_fill_price = p_val
                     except Exception:
                         pass
+
+            # Direct token balance check on exchange to catch instant/sub-second fills
+            tok_bal = self.live_strategy.get_token_balance(token_id)
+            if tok_bal >= 0.5:
+                size_matched = max(size_matched, tok_bal)
         else:
             # Simulation fallback: Market price dips <= limit_buy_price (unless timed out)
             if elapsed_sec < timeout_sec and eff_price is not None and eff_price <= limit_buy_price:
@@ -916,13 +982,18 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             filled_qty = pos.get("Filled_Quantity", 0.0)
 
             if filled_qty <= 0.0:
+                cancel_res = {"success": False, "matched": False, "reason": ""}
                 if buy_order_id:
-                    self.cancel_order_on_exchange(buy_order_id)
+                    cancel_res = self.cancel_order_on_exchange(buy_order_id)
 
-                # Re-query exchange order info to confirm if the order actually filled before/during cancellation
+                # Re-query exchange order info & token balance to confirm if the order filled before/during cancellation
                 check_info = None
                 if self.live_strategy and self.live_strategy.clob_client and buy_order_id and not str(buy_order_id).startswith("V3_"):
                     check_info = self.live_strategy.get_order_from_exchange(buy_order_id)
+
+                tok_bal = 0.0
+                if self.live_strategy and self.live_strategy.clob_client and token_id:
+                    tok_bal = self.live_strategy.get_token_balance(token_id)
 
                 check_matched = 0.0
                 check_price = None
@@ -950,17 +1021,23 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     if check_matched > 0 or making > 0 or taking > 0 or status_upper in ("MATCHED", "FILLED", "CLOSED"):
                         is_bought = True
 
-                # If check_info shows filled/matched shares on exchange:
+                # If token balance is held OR cancel notice said matched, IT IS BOUGHT!
+                if tok_bal >= 0.5 or cancel_res.get("matched", False):
+                    is_bought = True
+                    if tok_bal > 0:
+                        check_matched = max(check_matched, tok_bal)
+
+                # If check_info or token balance shows filled/matched shares on exchange:
                 if is_bought:
                     final_fill_price = check_price if (check_price is not None and check_price > 0) else limit_buy_price
-                    calc_qty = check_matched
+                    calc_qty = check_matched if check_matched > 0 else tok_bal
                     if calc_qty <= 0 and taking > 0:
                         calc_qty = round(taking / 1000000.0, 4) if taking > 1000 else round(taking, 4)
                     final_fill_qty = calc_qty if calc_qty > 0 else target_qty
 
-                    high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.75)
+                    high_odds_cutoff = getattr(config, "v2_high_odds_cutoff", 0.80)
                     high_odds_tp = getattr(config, "v2_high_odds_tp_target", 0.9900)
-                    tp_cents = getattr(config, "v2_take_profit_cents", 0.05)
+                    tp_cents = getattr(config, "v2_take_profit_cents", 0.20)
                     trailing_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.10)
 
                     hwm = max(final_fill_price, peak_price)
@@ -974,6 +1051,25 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     pos["Stop_Loss_Price"] = stop_loss_price
                     pos["High_Water_Mark"] = hwm
                     pos["Position_Status"] = "OPEN"
+                    pos["Updated_At"] = now_dt
+
+                    if self.async_writer:
+                        sql = """
+                            UPDATE Positions SET
+                                Average_Fill_Price = ?,
+                                Filled_Quantity = ?,
+                                Take_Profit_Price = ?,
+                                Stop_Loss_Price = ?,
+                                High_Water_Mark = ?,
+                                Position_Status = 'OPEN',
+                                Updated_At = ?
+                            WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'PENDING_FILL');
+                        """
+                        self.async_writer.enqueue_write(
+                            sql,
+                            (final_fill_price, final_fill_qty, take_profit_price, stop_loss_price, hwm, now_dt, buy_order_id, candle_start)
+                        )
+
                     logger.info(
                         f"🎯 [V3 TIMEOUT RECONCILIATION] Order {buy_order_id} filled {final_fill_qty:.4f} shares at ${final_fill_price:.4f} on exchange! "
                         f"Transitioning to OPEN position for live TP/SL tracking."
@@ -1018,7 +1114,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 pos["Position_Status"] = "OPEN"
                 logger.info(
                     f"🎯 [V3 MAKER ORDER PARTIAL FILL TIMEOUT] Closed remaining buy order balance for {buy_order_id}. "
-                    f"Transitioned {filled_qty:.4f} filled shares to OPEN position."
+                    f"Retained {filled_qty:.4f} filled shares in OPEN position."
                 )
 
                 if not pos.get("Entry_Notified"):
@@ -1548,10 +1644,26 @@ class LiveExecutionStrategy(IExecutionStrategy):
     ) -> Optional[Dict[str, Any]]:
         if config.is_dry_run() or not self.clob_client:
             logger.info("Live execution fallback: Delegating to DryExecutionStrategy (Simulation Mode active).")
-            return self.dry_strategy.execute_entry(
-                candle_start, slug, side, prob_cal, prob_uncal, target_price,
-                position_usd, token_id, current_bid, current_ask
+            return self.dry_strategy.execute_entry_v3(
+                candle_start=candle_start,
+                slug=slug,
+                side=side,
+                token_id=token_id,
+                trigger_odds_10s_ago=target_price,
+                entry_odds=current_ask or target_price,
+                position_usd=position_usd
             )
+
+        # Pre-flight check available USDC collateral balance
+        avail_usdc = self.get_collateral_balance()
+        if avail_usdc > 0 and avail_usdc < 1.00:
+            logger.warning(f"⚠ [LIVE BALANCE INSUFFICIENT] Available USDC=${avail_usdc:.2f} is less than $1.00 minimum order size. Skipping entry.")
+            return None
+
+        spend_usd = position_usd
+        if avail_usdc > 0 and avail_usdc < position_usd:
+            spend_usd = max(1.00, round(avail_usdc - 0.05, 2))
+            logger.info(f"ℹ [POSITION SIZING ADJUSTMENT] Available USDC=${avail_usdc:.2f} < Requested ${position_usd:.2f}. Adjusting spend to ${spend_usd:.2f}.")
 
         # Real Polymarket CLOB REST API Order Dispatch via py-clob-client V2
         try:
@@ -1563,7 +1675,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
             maker_offset = getattr(config, "v3_maker_offset_cents", 0.02)
             entry_odds = current_ask or target_price
             limit_buy_price = round(max(0.01, entry_odds - maker_offset), 4)
-            raw_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+            raw_qty = round(spend_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
             target_qty = max(5.0, raw_qty)
 
             logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Post-Only Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} Qty={target_qty}")
@@ -1603,7 +1715,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 "Filled_Quantity": 0.0,
                 "Sell_Quantity": 0.0,
                 "Average_Fill_Price": None,
-                "Take_Profit_Price": round(limit_buy_price + getattr(config, "v2_take_profit_cents", 0.05), 4),
+                "Take_Profit_Price": round(limit_buy_price + getattr(config, "v2_take_profit_cents", 0.20), 4),
                 "Stop_Loss_Price": round(max(0.01, limit_buy_price - getattr(config, "v2_trailing_sl_distance_cents", 0.10)), 4),
                 "Buy_Order_Id": order_id,
                 "Order_Id": order_id,
@@ -1630,10 +1742,6 @@ class LiveExecutionStrategy(IExecutionStrategy):
         return self.dry_strategy.execute_exit(candle_start, token_id, exit_price, reason)
 
     def post_limit_sell(self, token_id: str, price: float, size: float) -> Optional[Dict[str, Any]]:
-        """
-        Posts a physical Resting Limit Sell Order at Take_Profit_Price on Polymarket CLOB.
-        Synchronizes AssetType.CONDITIONAL token balance & allowance cache prior to dispatch.
-        """
         if not self.clob_client:
             return None
         try:
@@ -1641,8 +1749,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType, BalanceAllowanceParams, AssetType
                 try:
                     self.clob_client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id))
-                except Exception as sync_err:
-                    logger.warning(f"Conditional allowance update notice for {token_id[:8]}: {sync_err}")
+                except Exception:
+                    pass
             except ImportError:
                 from py_clob_client.clob_types import OrderArgs, OrderType
 
@@ -1663,6 +1771,48 @@ class LiveExecutionStrategy(IExecutionStrategy):
                 return {"error": "ZERO_BALANCE", "message": str(e)}
             return None
 
+    def get_token_balance(self, token_id: str) -> float:
+        """
+        Fetches real-time conditional token share balance for a specific token directly from Polymarket.
+        """
+        if not self.clob_client or not token_id:
+            return 0.0
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+            resp = self.clob_client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            )
+            if resp and isinstance(resp, dict):
+                raw_bal = resp.get("balance", 0.0)
+                val = float(raw_bal)
+                if val > 1000.0:
+                    return round(val / 1000000.0, 4)
+                return round(val, 4)
+        except Exception as e:
+            logger.debug(f"Failed to query token balance for {token_id[:8]}...: {e}")
+        return 0.0
+
+    def get_collateral_balance(self) -> float:
+        """
+        Fetches real-time USDC collateral balance directly from Polymarket CLOB.
+        """
+        if not self.clob_client:
+            return 0.0
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+            resp = self.clob_client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            if resp and isinstance(resp, dict):
+                raw_bal = resp.get("balance", 0.0)
+                val = float(raw_bal)
+                if val > 1000.0:
+                    return round(val / 1000000.0, 4)
+                return round(val, 4)
+        except Exception as e:
+            logger.debug(f"Failed to query collateral balance: {e}")
+        return 0.0
+
     def get_order_from_exchange(self, order_id: str) -> Optional[Dict[str, Any]]:
         """
         Queries Polymarket's exchange REST API directly for real-time status & sizeMatched.
@@ -1678,33 +1828,48 @@ class LiveExecutionStrategy(IExecutionStrategy):
             logger.warning(f"Failed to query order {order_id} from exchange: {e}")
         return None
 
-    def cancel_order_on_exchange(self, buy_order_id: str) -> bool:
-        if self.clob_client and buy_order_id:
-            try:
-                cancel_fn = getattr(self.clob_client, "cancel_orders", None)
-                if cancel_fn:
-                    resp = cancel_fn([buy_order_id])
-                    if isinstance(resp, dict):
-                        canceled_list = resp.get("canceled", [])
-                        not_canceled_map = resp.get("not_canceled", {})
-                        if buy_order_id in canceled_list or str(buy_order_id) in canceled_list:
-                            logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} confirmed cancelled on exchange.")
-                            return True
-                        elif buy_order_id in not_canceled_map or str(buy_order_id) in not_canceled_map:
-                            reason = not_canceled_map.get(buy_order_id) or not_canceled_map.get(str(buy_order_id))
-                            logger.info(f"ℹ [CLOB CANCEL NOTICE] OrderID={buy_order_id}: {reason}")
-                            return True
+    def cancel_order_on_exchange(self, buy_order_id: str) -> Dict[str, Any]:
+        """
+        Cancels order on Polymarket CLOB exchange and returns detailed cancellation / match status.
+        """
+        res = {"success": False, "matched": False, "reason": ""}
+        if not self.clob_client or not buy_order_id:
+            return res
+        try:
+            cancel_fn = getattr(self.clob_client, "cancel_orders", None)
+            if cancel_fn:
+                resp = cancel_fn([buy_order_id])
+                if isinstance(resp, dict):
+                    canceled_list = resp.get("canceled", [])
+                    not_canceled_map = resp.get("not_canceled", {})
+                    if buy_order_id in canceled_list or str(buy_order_id) in canceled_list:
+                        logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} confirmed cancelled on exchange.")
+                        res["success"] = True
+                        return res
+                    elif buy_order_id in not_canceled_map or str(buy_order_id) in not_canceled_map:
+                        reason = not_canceled_map.get(buy_order_id) or not_canceled_map.get(str(buy_order_id))
+                        res["reason"] = str(reason)
+                        logger.info(f"ℹ [CLOB CANCEL NOTICE] OrderID={buy_order_id}: {reason}")
+                        if "matched" in str(reason).lower() or "already canceled or matched" in str(reason).lower():
+                            res["matched"] = True
+                        return res
+                logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} | Response={resp}")
+                res["success"] = True
+                return res
+            else:
+                cancel_single = getattr(self.clob_client, "cancel_order", getattr(self.clob_client, "cancel", None))
+                if cancel_single:
+                    resp = cancel_single(buy_order_id)
                     logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} | Response={resp}")
-                    return True
-                else:
-                    cancel_single = getattr(self.clob_client, "cancel_order", getattr(self.clob_client, "cancel", None))
-                    if cancel_single:
-                        resp = cancel_single(buy_order_id)
-                        logger.info(f"⚡ [LIVE CLOB ORDER CANCELLED] OrderID={buy_order_id} | Response={resp}")
-                        return True
-            except Exception as e:
-                logger.error(f"⚠ Failed physical CLOB order cancellation for {buy_order_id}: {e}")
-        return False
+                    res["success"] = True
+                    return res
+        except Exception as e:
+            err_str = str(e).lower()
+            res["reason"] = str(e)
+            if "matched" in err_str or "already canceled or matched" in err_str:
+                res["matched"] = True
+            logger.error(f"⚠ Failed physical CLOB order cancellation for {buy_order_id}: {e}")
+        return res
 
     def check_and_update_positions(
         self,
@@ -1725,5 +1890,3 @@ class LiveExecutionStrategy(IExecutionStrategy):
         current_ask: Optional[float]
     ) -> Optional[Dict[str, Any]]:
         return self.dry_strategy.process_tick(candle_start, slug, side, token_id, current_bid, current_ask)
-
-
