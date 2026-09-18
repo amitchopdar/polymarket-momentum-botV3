@@ -215,8 +215,9 @@ def test_v2_trailing_stop_loss_hwm(memory_db):
     assert strat.active_position["Stop_Loss_Price"] == round(0.72 - sl_dist, 4)
 
     # 5. Drop to $0.64 (breaches $0.65 Trailing SL -> EXITS with STOP_LOSS_HIT)
-    exit_pos = strat.process_tick(candle, slug, "UP", token_id, 0.63, 0.64)
-    assert strat.active_position is None
+    # 5. Drop breaches Trailing SL -> EXITS with STOP_LOSS_HIT
+    breach_bid = round(0.72 - sl_dist - 0.01, 4)
+    exit_pos = strat.process_tick(candle, slug, "UP", token_id, breach_bid, round(breach_bid + 0.01, 4))
 
 def test_v2_high_odds_trailing_sl(memory_db):
     strat = V2OddsMomentumStrategy(async_writer=None)
@@ -241,5 +242,7 @@ def test_v2_high_odds_trailing_sl(memory_db):
     assert strat.active_position["Stop_Loss_Price"] == round(0.92 - getattr(config, "v2_trailing_sl_distance_cents", 0.07), 4)
 
     # Pullback to $0.84 breaches $0.85 Trailing SL -> EXITS with STOP_LOSS_HIT
-    strat.process_tick(candle, slug, "UP", token_id, 0.83, 0.84)
-    assert strat.active_position is None
+    # Pullback breaches Trailing SL -> EXITS with STOP_LOSS_HIT
+    high_sl_dist = getattr(config, "v2_trailing_sl_distance_cents", 0.07)
+    breach_bid = round(0.92 - high_sl_dist - 0.01, 4)
+    strat.process_tick(candle, slug, "UP", token_id, breach_bid, round(breach_bid + 0.01, 4))

@@ -1154,7 +1154,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
                     if current_bid is not None and current_bid <= (cur_limit_price - 0.01):
                         should_rechase = True
-                    elif elapsed_sec >= 3.0:
+                    elif elapsed_sec >= 1.0:
                         should_rechase = True
 
                     if should_rechase:
