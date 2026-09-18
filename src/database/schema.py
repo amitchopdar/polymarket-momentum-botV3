@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS Positions (
     High_Water_Mark REAL,
     Buy_Order_Id TEXT,
     Sell_Order_Id TEXT,
+    Hedge_Token_Id TEXT,
+    Hedge_Buy_Price REAL,
+    Hedge_Quantity REAL,
+    Hedge_Order_Id TEXT,
     Exit_Timestamp DATETIME,
     Exit_Price REAL,
     Exit_Reason TEXT,
@@ -88,6 +92,8 @@ CREATE TABLE IF NOT EXISTS Positions (
     Position_Status TEXT NOT NULL,
     Cancel_Reason TEXT,
     Pnl REAL DEFAULT 0.0,
+    Settled_Timestamp DATETIME,
+    Winning_Outcome TEXT,
     Updated_At DATETIME NOT NULL
 );
 """
@@ -141,6 +147,21 @@ def create_tables(conn: sqlite3.Connection) -> None:
             cursor.execute(CREATE_POSITIONS_TABLE)
     else:
         cursor.execute(CREATE_POSITIONS_TABLE)
+
+        # Check and add new hedge & settlement columns to Positions if table already exists
+    cursor.execute("PRAGMA table_info(Positions);")
+    pos_cols = [row[1] for row in cursor.fetchall()]
+    new_cols = {
+        "Hedge_Token_Id": "TEXT",
+        "Hedge_Buy_Price": "REAL",
+        "Hedge_Quantity": "REAL",
+        "Hedge_Order_Id": "TEXT",
+        "Settled_Timestamp": "DATETIME",
+        "Winning_Outcome": "TEXT"
+    }
+    for col, col_type in new_cols.items():
+        if col not in pos_cols:
+            cursor.execute(f"ALTER TABLE Positions ADD COLUMN {col} {col_type};")
 
     # Check and migrate Status column if table existed previously without it
     cursor.execute("PRAGMA table_info(Odds_OHCLV);")

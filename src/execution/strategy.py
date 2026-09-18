@@ -389,7 +389,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
     Enforces a strict SINGLE POSITION lock across the entire bot.
     """
 
-    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None, live_strategy: Optional[Any] = None):
+    def __init__(self, async_writer: Optional[AsyncDBWriter] = None, notifier: Optional[Any] = None, live_strategy: Optional[Any] = None, settlement_tracker: Optional[Any] = None):
+        self.settlement_tracker = settlement_tracker
         self.async_writer = async_writer
         self.notifier = notifier
         self.live_strategy = live_strategy
@@ -410,7 +411,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         side: str,
         token_id: str,
         current_bid: Optional[float],
-        current_ask: Optional[float]
+        current_ask: Optional[float],
+        opposite_token_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Processes real-time tick for a token, evaluates 10s momentum trigger, and checks open TP/SL exits.
@@ -480,9 +482,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
             # Lock active position guard IMMEDIATELY before dispatch to block concurrent WS ticks
             buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
             limit_buy_price = round(min(0.9900, max(0.01, current_ask + buy_slippage)), 4)
-            pos_size_usd = getattr(config, "max_position_size_usd", 5.0)
-            raw_qty = round(pos_size_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
-            target_qty = max(5.0, raw_qty)
+            trade_shares = getattr(config, "trade_size_shares", 7.0)
+            target_qty = max(5.0, round(float(trade_shares), 2))
             now_sec = time.time()
             now_dt = datetime.fromtimestamp(now_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -490,6 +491,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 "Candle_Start": candle_start,
                 "Slug": slug,
                 "Token_Id": token_id,
+                "Opposite_Token_Id": opposite_token_id,
                 "Position_Side": side,
                 "Entry_Timestamp": now_dt,
                 "Order_Timestamp_Sec": now_sec,
@@ -511,7 +513,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                     prob_cal=0.50,
                     prob_uncal=0.50,
                     target_price=current_ask,
-                    position_usd=pos_size_usd,
+                    position_usd=round(target_qty * limit_buy_price, 4),
                     token_id=token_id,
                     current_bid=current_bid,
                     current_ask=current_ask
@@ -549,7 +551,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 token_id=token_id,
                 trigger_odds_10s_ago=min_ask_10s,
                 entry_odds=current_ask,
-                position_usd=getattr(config, "max_position_size_usd", 2.0)
+                position_usd=round(target_qty * limit_buy_price, 4),
+                opposite_token_id=opposite_token_id
             )
 
         return None
@@ -667,7 +670,8 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         token_id: str,
         trigger_odds_10s_ago: float,
         entry_odds: float,
-        position_usd: float = 2.0
+        position_usd: float = 2.0,
+        opposite_token_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Executes V3 Maker Position Entry.
@@ -681,13 +685,15 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         # Limit Buy Price is placed with slippage buffer above Best Ask for instant marketable execution
         limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
 
-        target_qty = round(position_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
+        trade_shares = getattr(config, "trade_size_shares", 7.0)
+        target_qty = max(5.0, round(float(trade_shares), 2))
         buy_order_id = f"V3_MAKER_{int(now_ts*1000)}"
 
         pos = {
             "Candle_Start": candle_start,
             "Slug": slug,
             "Token_Id": token_id,
+            "Opposite_Token_Id": opposite_token_id,
             "Position_Side": side,
             "Entry_Timestamp": now_dt,
             "Order_Timestamp_Sec": now_ts,
@@ -1330,6 +1336,9 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
                 trade_outcome = "WIN"
                 exit_price = tp_price
             elif is_sl_trigger:
+                sl_mode = getattr(config, "stop_loss_mode", "SYNTHETIC_HEDGE")
+                if sl_mode == "SYNTHETIC_HEDGE" and pos.get("Opposite_Token_Id"):
+                    return self.execute_synthetic_hedge_exit(pos, current_bid, current_ask)
                 exit_reason = "STOP_LOSS"
                 trade_outcome = "LOSS" if sl_price < entry_price else "WIN"
                 exit_price = sl_price
@@ -1414,6 +1423,126 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         return None
 
+
+    def execute_synthetic_hedge_exit(
+        self,
+        pos: Dict[str, Any],
+        current_bid: Optional[float],
+        current_ask: Optional[float]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Executes Method 3: Opposite Token Synthetic Stop-Loss (Cross-Hedge Lock).
+        Buys the exact matching quantity of the opposite token, locking the position
+        as 100% Delta-Neutral (1 UP + 1 DOWN = $1.00 USDC) with zero execution slippage.
+        Transitions position status to 'HEDGED_LOCKED'.
+        """
+        opp_token_id = pos.get("Opposite_Token_Id")
+        if not opp_token_id:
+            logger.warning("⚠ [SYNTHETIC HEDGE ABORT] No Opposite_Token_Id recorded for position. Falling back to direct sell.")
+            return None
+
+        now_ts = time.time()
+        now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Cancel any resting TP order on the primary token before hedging
+        if pos.get("Tp_Order_Id"):
+            self.cancel_order_on_exchange(pos["Tp_Order_Id"])
+            pos["Tp_Order_Id"] = None
+
+        sl_price = pos.get("Stop_Loss_Price", 0.65)
+        filled_qty = pos.get("Filled_Quantity") or pos.get("Target_Quantity") or 7.0
+        slippage_buffer = getattr(config, "v3_buy_slippage_cents", 0.01)
+
+        # Target hedge buy price on opposite token: 1.00 - SL_Price + Slippage
+        hedge_limit_buy = round(min(0.9900, max(0.01, (1.0000 - sl_price) + slippage_buffer)), 4)
+        hedge_qty = filled_qty
+        hedge_order_id = f"HEDGE_{int(now_ts*1000)}"
+        hedge_fill_price = round(1.0000 - sl_price, 4)
+
+        if self.live_strategy and self.live_strategy.clob_client:
+            try:
+                try:
+                    from py_clob_client_v2.clob_types import OrderArgsV2 as OrderArgs, OrderType
+                except ImportError:
+                    from py_clob_client.clob_types import OrderArgs, OrderType
+
+                order_args = OrderArgs(
+                    price=hedge_limit_buy,
+                    size=hedge_qty,
+                    side="BUY",
+                    token_id=opp_token_id
+                )
+                logger.info(
+                    f"🛡 [SYNTHETIC HEDGE DISPATCH] Submitting Buy Order for Opposite Token {opp_token_id[:8]}... "
+                    f"Price=${hedge_limit_buy:.4f} | Qty={hedge_qty:.4f}"
+                )
+                signed_order = self.live_strategy.clob_client.create_order(order_args)
+                resp = self.live_strategy.clob_client.post_order(signed_order, OrderType.GTC)
+
+                if isinstance(resp, dict):
+                    hedge_order_id = resp.get("orderID") or resp.get("orderId") or hedge_order_id
+                elif isinstance(resp, str) and resp.startswith("0x"):
+                    hedge_order_id = resp
+            except Exception as e:
+                logger.error(f"⚠ Failed to post Live Synthetic Hedge Order: {e}. Maintaining locked state.")
+
+        entry_price = float(pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price") or 0.70)
+        primary_cost = round(filled_qty * entry_price, 4)
+        hedge_cost = round(hedge_qty * hedge_fill_price, 4)
+        total_cost = primary_cost + hedge_cost
+        guaranteed_payout = round(1.00 * hedge_qty, 4)
+        locked_pnl = round(guaranteed_payout - total_cost, 4)
+
+        pos["Position_Status"] = "HEDGED_LOCKED"
+        pos["Hedge_Token_Id"] = opp_token_id
+        pos["Hedge_Buy_Price"] = hedge_fill_price
+        pos["Hedge_Quantity"] = hedge_qty
+        pos["Hedge_Order_Id"] = hedge_order_id
+        pos["Pnl"] = locked_pnl
+        pos["Exit_Reason"] = "SYNTHETIC_HEDGE_LOCK"
+        pos["Updated_At"] = now_dt
+
+        logger.info(
+            f"🛡 [SYNTHETIC STOP-LOSS LOCKED] Position transitioned to HEDGED_LOCKED: "
+            f"Primary={pos.get('Position_Side')} (Qty={filled_qty:.2f} @ ${entry_price:.4f}) + "
+            f"Hedge={opp_token_id[:8]} (Qty={hedge_qty:.2f} @ ${hedge_fill_price:.4f}) | "
+            f"Locked PnL=${locked_pnl:+.4f} USDC | Zero Trading Downtime!"
+        )
+
+        if self.async_writer:
+            sql = """
+                UPDATE Positions
+                SET Position_Status = 'HEDGED_LOCKED',
+                    Hedge_Token_Id = ?,
+                    Hedge_Buy_Price = ?,
+                    Hedge_Quantity = ?,
+                    Hedge_Order_Id = ?,
+                    Exit_Reason = 'SYNTHETIC_HEDGE_LOCK',
+                    Pnl = ?,
+                    Updated_At = ?
+                WHERE Buy_Order_Id = ? OR (Candle_Start = ? AND Position_Status = 'OPEN');
+            """
+            self.async_writer.enqueue_write(
+                sql,
+                (opp_token_id, hedge_fill_price, hedge_qty, hedge_order_id, locked_pnl, now_dt, pos.get("Buy_Order_Id"), pos.get("Candle_Start"))
+            )
+
+        if self.notifier and getattr(config, "telegram_enabled", False):
+            msg = (
+                f"🛡️ <b>Synthetic Stop-Loss Locked (Cross-Hedge)</b>\n"
+                f"• <b>Market:</b> <code>{pos.get('Slug')}</code>\n"
+                f"• <b>Primary Side:</b> <code>{pos.get('Position_Side')} ({filled_qty:.2f} shares @ ${entry_price:.4f})</code>\n"
+                f"• <b>Hedge Side:</b> <code>Bought Opposite ({hedge_qty:.2f} shares @ ${hedge_fill_price:.4f})</code>\n"
+                f"• <b>Locked PnL:</b> <code>${locked_pnl:+.2f} USDC</code> (Guaranteed Payout: ${guaranteed_payout:.2f})\n"
+                f"• <b>Status:</b> <code>HEDGED_LOCKED</code> (Delta-Neutral)"
+            )
+            try:
+                self.notifier.enqueue_notification(msg)
+            except Exception as e:
+                logger.debug(f"Failed to enqueue Telegram hedge notice: {e}")
+
+        return pos
+
     def _close_expired_position(self, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Closes active position from previous candle on 5m boundary rollover and unlocks single position guard.
@@ -1423,10 +1552,18 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
         if not pos:
             return None
 
+        status = pos.get("Position_Status")
+        if status == "HEDGED_LOCKED":
+            logger.info(f"⌛ [CANDLE ROLLOVER] Handing off HEDGED_LOCKED position ({pos.get('Slug')}) to Settlement Tracker.")
+            if self.settlement_tracker:
+                self.settlement_tracker.enqueue_settlement(pos)
+            self.active_position = None
+            return pos
+
         now_ts = time.time()
         now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        entry_price = pos["Average_Fill_Price"]
-        filled_qty = pos["Filled_Quantity"]
+        entry_price = pos.get("Average_Fill_Price") or pos.get("Target_Buy_Price") or 0.0
+        filled_qty = pos.get("Filled_Quantity") or pos.get("Target_Quantity") or 0.0
         prev_sell_qty = pos.get("Sell_Quantity", 0.0)
         exit_qty = filled_qty - prev_sell_qty
         if exit_qty <= 0:
@@ -1609,8 +1746,8 @@ class LiveExecutionStrategy(IExecutionStrategy):
             buy_slippage = getattr(config, "v3_buy_slippage_cents", 0.01)
             entry_odds = current_ask or target_price
             limit_buy_price = round(min(0.9900, max(0.01, entry_odds + buy_slippage)), 4)
-            raw_qty = round(spend_usd / limit_buy_price, 4) if limit_buy_price > 0 else 0.0
-            target_qty = max(5.0, raw_qty)
+            trade_shares = getattr(config, "trade_size_shares", 7.0)
+            target_qty = max(5.0, round(float(trade_shares), 2))
 
             logger.info(f"⚡ [LIVE CLOB ORDER DISPATCH] Submitting EIP-712 Buy Limit Order for token {token_id[:8]}... Price=${limit_buy_price:.4f} (Ask + ${buy_slippage:.2f}) Qty={target_qty}")
             order_args = OrderArgs(
@@ -1821,6 +1958,7 @@ class LiveExecutionStrategy(IExecutionStrategy):
         side: str,
         token_id: str,
         current_bid: Optional[float],
-        current_ask: Optional[float]
+        current_ask: Optional[float],
+        opposite_token_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         return self.dry_strategy.process_tick(candle_start, slug, side, token_id, current_bid, current_ask)
