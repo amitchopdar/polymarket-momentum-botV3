@@ -81,7 +81,8 @@ USER_V3_STOP_LOSS_MODE = "SYNTHETIC_HEDGE" # Stop loss mode: SYNTHETIC_HEDGE or 
 USER_V2_MAX_ACTIVE_POSITIONS = 1          # Single active position limit across bot (1 position)
 
 # Polymarket Bot V3 Maker & Timeout Parameters
-USER_V3_BUY_SLIPPAGE_CENTS = 0.01          # 1 cent (+0.01) buffer above ask for instant marketable limit buy fill
+USER_V3_BUY_SLIPPAGE_CENTS = 0.01          # 1 cent (+0.01) buffer above ask for entry marketable limit buy fill
+USER_V3_HEDGE_SLIPPAGE_CENTS = 0.01        # 1 cent (+0.01) buffer above ask for synthetic stop-loss hedge order
 USER_V3_MAKER_OFFSET_CENTS = 0.01         # Alias for buy offset
 USER_V3_MAKER_ORDER_TIMEOUT_SEC = 5.0     # 5 seconds order cancellation timeout
 # ==============================================================================
@@ -142,6 +143,7 @@ class AppConfig:
 
     # V3 Execution Configuration
     v3_buy_slippage_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_BUY_SLIPPAGE_CENTS") or os.getenv("V3_MAKER_OFFSET_CENTS"), USER_V3_BUY_SLIPPAGE_CENTS))
+    v3_hedge_slippage_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_HEDGE_SLIPPAGE_CENTS") or os.getenv("HEDGE_SLIPPAGE_CENTS"), USER_V3_HEDGE_SLIPPAGE_CENTS))
     v3_maker_offset_cents: float = field(default_factory=lambda: _safe_float(os.getenv("V3_BUY_SLIPPAGE_CENTS") or os.getenv("V3_MAKER_OFFSET_CENTS"), USER_V3_MAKER_OFFSET_CENTS))
     v3_maker_order_timeout_sec: float = field(default_factory=lambda: _safe_float(os.getenv("V3_MAKER_ORDER_TIMEOUT_SEC"), USER_V3_MAKER_ORDER_TIMEOUT_SEC))
 

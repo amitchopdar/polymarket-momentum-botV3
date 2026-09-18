@@ -1451,7 +1451,7 @@ class V2OddsMomentumStrategy(IExecutionStrategy):
 
         sl_price = pos.get("Stop_Loss_Price", 0.65)
         filled_qty = pos.get("Filled_Quantity") or pos.get("Target_Quantity") or 7.0
-        slippage_buffer = getattr(config, "v3_buy_slippage_cents", 0.01)
+        slippage_buffer = getattr(config, "v3_hedge_slippage_cents", getattr(config, "v3_buy_slippage_cents", 0.01))
 
         # Target hedge buy price on opposite token: 1.00 - SL_Price + Slippage
         hedge_limit_buy = round(min(0.9900, max(0.01, (1.0000 - sl_price) + slippage_buffer)), 4)
